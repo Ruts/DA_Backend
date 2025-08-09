@@ -4,7 +4,7 @@ import os
 import google.generativeai as genai
 
 genai.configure(api_key="AIzaSyBF5ys8AH4ZWeyvy1oVHj8NRIVcDA9ad_I")
-model = genai.GenerativeModel("gemini-1.5-flash")  # or "gemini-1.5-pro"
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 app = FastAPI()
 
