@@ -3,3 +3,4 @@ uvicorn
 gunicorn
 google.generativeai
 twilio
+python-multipart
