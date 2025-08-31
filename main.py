@@ -50,11 +50,25 @@ async def send_whatsapp(request: Request):
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
+# @app.post("/receive-whatsapp")
+# async def receive_whatsapp(request: Request):
+#     data = await request.form()
+#     from_number = data.get("From")
+#     message_body = data.get("Body")
+
+#     # You can process or respond to the message here
+#     return {"from": from_number, "message": message_body}
+
 @app.post("/receive-whatsapp")
 async def receive_whatsapp(request: Request):
-    data = await request.form()
-    from_number = data.get("From")
-    message_body = data.get("Body")
+    try:
+        data = await request.form()
+        print("Received form data:", data)
 
-    # You can process or respond to the message here
-    return {"from": from_number, "message": message_body}
+        from_number = data.get("From")
+        message_body = data.get("Body")
+
+        return {"from": from_number, "message": message_body}
+    except Exception as e:
+        print("Error receiving WhatsApp message:", str(e))
+        return {"error": str(e)}
