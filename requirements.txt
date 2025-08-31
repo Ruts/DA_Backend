@@ -4,3 +4,4 @@ gunicorn
 google.generativeai
 twilio
 python-multipart
+Pillow
