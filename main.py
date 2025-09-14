@@ -35,7 +35,9 @@ class SoilSample(BaseModel):
     soilTexture: str
     moistureContent: float
 
-load_dotenv()
+# Only load .env if running locally
+if os.getenv("AZURE_ENVIRONMENT") != "production":
+    load_dotenv()
 
 ROLE_PROMPT = os.getenv("ROLE_PROMPT")
 print(f"ROLE_PROMPT: {ROLE_PROMPT}")
