@@ -5,3 +5,6 @@ google.generativeai
 twilio
 python-multipart
 Pillow
+azure-cosmos
+python-jose
+uuid
