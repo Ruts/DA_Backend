@@ -1,4 +1,4 @@
-# Farm Management & Advisory API
+# 🌱 Digital Agronomist API
 
 This project is a FastAPI-based backend designed for digital agriculture platforms.
 It integrates soil monitoring, crop advisory, farm management, image analysis, and WhatsApp-based farmer communication using Google Gemini LLMs, Twilio, and Azure services.
