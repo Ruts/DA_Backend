@@ -7,7 +7,6 @@ python-multipart
 Pillow
 azure-cosmos
 python-jose
-uuid
 azure.storage.blob
 pydantic==1.10.13
 dotenv
