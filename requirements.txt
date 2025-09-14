@@ -10,5 +10,4 @@ python-jose
 uuid
 azure.storage.blob
 pydantic
-typing
 dotenv
