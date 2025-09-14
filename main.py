@@ -384,7 +384,8 @@ def generate_sas_url(blob_name: str) -> str:
         permission=BlobSasPermissions(read=True),
         expiry=datetime.utcnow() + timedelta(hours=1)
     )
-    return f"{os.getenv("IMAGE_STORAGE_URL")}/{blob_name}?{sas_token}"
+    url_base = os.getenv("IMAGE_STORAGE_URL")
+    return f"{url_base}/{blob_name}?{sas_token}"
 
 @app.post("/soil-samples")
 async def store_soil_sample(sample: SoilSample, user=Depends(get_current_user)):
