@@ -9,5 +9,5 @@ azure-cosmos
 python-jose
 uuid
 azure.storage.blob
-pydantic
+pydantic==1.10.13
 dotenv
