@@ -40,13 +40,9 @@ if os.getenv("AZURE_ENVIRONMENT") != "production":
     load_dotenv()
 
 ROLE_PROMPT = os.getenv("ROLE_PROMPT")
-print(f"ROLE_PROMPT: {ROLE_PROMPT}")
 IMAGE_ANALYSIS_PROMPTS = os.getenv("IMAGE_ANALYSIS_PROMPTS")
-print(f"IMAGE_ANALYSIS_PROMPTS: {IMAGE_ANALYSIS_PROMPTS}")
 SOIL_MONITORING_PROMPTS = os.getenv("SOIL_MONITORING_PROMPTS")
-print(f"SOIL_MONITORING_PROMPTS: {SOIL_MONITORING_PROMPTS}")
 RECOMMENDATION_PROMPS = os.getenv("RECOMMENDATION_PROMPS")
-print(f"RECOMMENDATION_PROMPS: {RECOMMENDATION_PROMPS}")
 SUMMARIZE = os.getenv("SUMMARIZE")
 
 genai.configure(api_key = os.getenv("GOOGLE_API_KEY"))
@@ -133,57 +129,6 @@ async def send_whatsapp(request: Request):
 @app.get("/latest-whatsapp")
 async def get_latest_whatsapp():
     return latest_whatsapp_message
-
-# @app.post("/receive-whatsapp")
-# async def receive_whatsapp(request: Request):
-#     global latest_whatsapp_message
-#     data = await request.form()
-#     from_number = data.get("From")
-#     message_body = data.get("Body")
-#     num_media = int(data.get("NumMedia", 0))
-
-#     latest_whatsapp_message = {
-#         "from": from_number,
-#         "message": message_body
-#     }
-
-#     print("Received WhatsApp message:", latest_whatsapp_message)
-
-#     try:
-#         if num_media > 0:
-#             media_url = data.get("MediaUrl0")
-#             media_type = data.get("MediaContentType0")
-
-#             # Download media from Twilio
-#             media_response = requests.get(media_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
-#             image_bytes = media_response.content
-
-#             # Send image to Gemini
-#             gemini_response = image_model.generate_content([
-#                 {"text": message_body or "Describe this image"},
-#                 {"inline_data": {"mime_type": media_type, "data": image_bytes}}
-#             ])
-#             answer = gemini_response.text
-#         else:
-#             # Text-only message
-#             response = model.generate_content(message_body)
-#             answer = response.text
-#     except Exception as e:
-#         print(f"Gemini processing failed: {e}")
-#         answer = "Sorry, I couldn't process your message or image."
-
-#     # Send response back via WhatsApp
-#     try:
-#         sent = client.messages.create(
-#             body=answer,
-#             from_=TWILIO_WHATSAPP_NUMBER,
-#             to=from_number
-#         )
-#         print(f"Sent reply to {from_number}: {answer}")
-#         return {"status": "replied", "sid": sent.sid}
-#     except Exception as e:
-#         print(f"Failed to send reply: {e}")
-#         return {"status": "error", "detail": str(e)}
 
 def send_verification_code(phone_number):
     code = str(random.randint(100000, 999999))
@@ -468,11 +413,35 @@ async def handle_chat(request: Request):
 async def receive_whatsapp(request: Request):
     data = await request.form()
     from_number = data.get("From").replace("whatsapp:", "")
+    num_media = int(data.get("NumMedia", 0))
     message_body = data.get("Body")
 
     # Forward to chat handler
     chat_response = await handle_chat(Request(scope={"type": "http"}, receive=lambda: None))
     answer = chat_response["answer"]
+
+    try:
+        if num_media > 0:
+            media_url = data.get("MediaUrl0")
+            media_type = data.get("MediaContentType0")
+
+            # Download media from Twilio
+            media_response = requests.get(media_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
+            image_bytes = media_response.content
+
+            # Send image to Gemini
+            gemini_response = image_model.generate_content([
+                {"text": message_body or "Describe this image"},
+                {"inline_data": {"mime_type": media_type, "data": image_bytes}}
+            ])
+            answer = gemini_response.text
+        else:
+            # Text-only message
+            response = model.generate_content(message_body)
+            answer = response.text
+    except Exception as e:
+        print(f"Gemini processing failed: {e}")
+        answer = "Sorry, I couldn't process your message or image."
 
     # Send reply via Twilio
     try:
@@ -497,6 +466,8 @@ async def analyze_farm_day(
     date: date = Form(...),
     user=Depends(get_current_user)
 ):
+    print(f"farmId: {farmId}")
+    print(f"date: {date}")
     # Step 1: Fetch grid images
     img_query = f"""
         SELECT * FROM c WHERE c.owner = '{user['phone']}' AND c.farmId = '{farmId}' AND c.date = '{date}'
@@ -557,13 +528,13 @@ Soil Data:
 {soil_text}
 
 {recommendation_prompt}
-
-{summarize_prompt}
     """
 
     # Step 5: Send to Google LLM
+    print(f"full_prompt: {full_prompt}")
     response = model.generate_content(full_prompt)
     answer = response.text
+    print(f"answer: {answer}")
 
     # Step 6: Store response
     analysis_doc = {
@@ -574,6 +545,20 @@ Soil Data:
         "timestamp": datetime.utcnow().isoformat()
     }
     chats_container.upsert_item(analysis_doc)
+
+    responseSummary = model.generate_content(answer + "\n\n Summarize the response in a formate suitable for a phone")
+    answerSummary = responseSummary.text
+    print(f"answerSummary: {answerSummary}")
+
+    try:
+        sent = client.messages.create(
+            body=answerSummary,
+            from_=TWILIO_WHATSAPP_NUMBER,
+            to="whatsapp:+" + user['phone']
+        )
+        print(f"message sent")
+    except Exception as e:
+        print(f"status: ", "error sending message ", "detail: ", str(e))
 
     return {"status": "complete", "response": answer}
 
