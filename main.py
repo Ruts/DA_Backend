@@ -89,7 +89,8 @@ soil_container = database.get_container_client(SOIL_CONTAINER_NAME)
 chats_container = database.get_container_client(CHATS_CONTAINER_NAME)
 
 blob_service_client = BlobServiceClient.from_connection_string(AZURE_STORAGE_CONNECTION_STRING)
-container_client = blob_service_client.get_container_client("grid-images")
+grid_images_client = blob_service_client.get_container_client("grid-images")
+user_images_client = blob_service_client.get_container_client("user-images")
 
 # Allow frontend to connect
 app.add_middleware(
@@ -287,7 +288,7 @@ async def upload_multiple_grid_images(
 
     for file in files:
         blob_name = f"{farmId}_{dateUploaded}_{uuid4()}.jpg"
-        blob_client = container_client.get_blob_client(blob_name)
+        blob_client = grid_images_client.get_blob_client(blob_name)
         blob_client.upload_blob(file.file, overwrite=True)
         image_urls.append(blob_client.url)
 
@@ -370,16 +371,118 @@ def serialize_dates(obj):
             obj[key] = value.isoformat()
     return obj
 
-@app.post("/chat")
-async def handle_chat(request: Request):
-    data = await request.json()
-    user = data.get("user")  # e.g. "+254712345678"
+# @app.post("/chat")
+# async def handle_chat(request: Request):
+#     data = await request.json()
+#     user = data.get("owner")  # e.g. "+254712345678"
+#     message = data.get("message")
+#     print(f"data: {data}")
+#     print(f"user: {user}")
+#     print(f"message: {message}")
+
+#     # Step 1: Store incoming message
+#     user_msg = {
+#         "id": str(uuid4()),
+#         "user": user["phone"],
+#         "role": "user",
+#         "message": message,
+#         "timestamp": datetime.utcnow().isoformat()
+#     }
+#     chats_container.upsert_item(user_msg)
+
+#     # Step 2: Fetch full history
+#     query = f"SELECT * FROM c WHERE c.user = '{user}' ORDER BY c.timestamp ASC"
+#     history = list(chats_container.query_items(query, enable_cross_partition_query=True))
+
+#     # Step 3: Format for LLM
+#     formatted = [{"role": h["role"], "content": h["message"]} for h in history]
+
+#     # Step 4: Send to LLM
+#     response = model.generate_content(formatted)
+#     answer = response.text
+#     print(f"response: {response}")
+#     print(f"answer: {answer}")
+
+#     # Step 5: Store assistant reply
+#     assistant_msg = {
+#         "id": str(uuid4()),
+#         "user": user["phone"],
+#         "role": "assistant",
+#         "message": answer,
+#         "timestamp": datetime.utcnow().isoformat()
+#     }
+#     chats_container.upsert_item(assistant_msg)
+
+#     return {"answer": answer}
+
+# @app.post("/receive-whatsapp")
+# async def receive_whatsapp(request: Request):
+#     data = await request.form()
+#     from_number = data.get("From").replace("whatsapp:", "")
+#     num_media = int(data.get("NumMedia", 0))
+#     message_body = data.get("Body")
+#     print(f"data: {data}")
+#     print(f"from_number: {from_number}")
+#     print(f"num_media: {num_media}")
+#     print(f"message_body: {message_body}")
+
+#     # Forward to chat handler
+#     chat_response = await handle_chat(Request(scope={"type": "http"}, receive=lambda: None))
+#     answer = chat_response["answer"]
+#     print(f"chat_response: {chat_response}")
+#     print(f"answer: {answer}")
+
+#     try:
+#         if num_media > 0:
+#             media_url = data.get("MediaUrl0")
+#             media_type = data.get("MediaContentType0")
+
+#             # Download media from Twilio
+#             media_response = requests.get(media_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
+#             image_bytes = media_response.content
+
+#             # Send image to Gemini
+#             gemini_response = image_model.generate_content([
+#                 {"text": message_body or "Describe this image"},
+#                 {"inline_data": {"mime_type": media_type, "data": image_bytes}}
+#             ])
+#             answer = gemini_response.text
+#         else:
+#             # Text-only message
+#             response = model.generate_content(message_body)
+#             answer = response.text
+#     except Exception as e:
+#         print(f"Gemini processing failed: {e}")
+#         answer = "Sorry, I couldn't process your message or image."
+
+#     # Send reply via Twilio
+#     try:
+#         sent = client.messages.create(
+#             body=answer,
+#             from_=TWILIO_WHATSAPP_NUMBER,
+#             to="whatsapp:" + from_number
+#         )
+#         return {"status": "replied", "sid": sent.sid}
+#     except Exception as e:
+#         return {"status": "error", "detail": str(e)}
+    
+# @app.get("/chat-history")
+# async def get_chat_history(user: str):
+#     query = f"SELECT * FROM c WHERE c.user = '{user}' ORDER BY c.timestamp ASC"
+#     history = list(chats_container.query_items(query, enable_cross_partition_query=True))
+#     return history
+
+async def handle_chat_payload(data: dict):
+    user = data.get("owner")  # e.g. "+254712345678"
     message = data.get("message")
+    print(f"data: {data}")
+    print(f"user: {user}")
+    print(f"message: {message}")
 
     # Step 1: Store incoming message
     user_msg = {
         "id": str(uuid4()),
-        "user": user,
+        "user": user["phone"],
         "role": "user",
         "message": message,
         "timestamp": datetime.utcnow().isoformat()
@@ -387,63 +490,96 @@ async def handle_chat(request: Request):
     chats_container.upsert_item(user_msg)
 
     # Step 2: Fetch full history
-    query = f"SELECT * FROM c WHERE c.user = '{user}' ORDER BY c.timestamp ASC"
+    phone = user["phone"]
+    query = f"SELECT * FROM c WHERE c.user = '{phone}' ORDER BY c.timestamp ASC"
     history = list(chats_container.query_items(query, enable_cross_partition_query=True))
 
     # Step 3: Format for LLM
-    formatted = [{"role": h["role"], "content": h["message"]} for h in history]
+    # formatted = [{"role": h["role"], "content": h["message"]} for h in history]
+    formatted = [
+        {"role": h["role"], "parts": [{"text": h["message"]}]}
+        for h in history
+    ]
+    print(f"formatted: {formatted}")
 
-    # Step 4: Send to LLM
-    response = model.generate_content(formatted)
-    answer = response.text
+    # # Step 4: Send to LLM
+    # response = model.generate_content(formatted)
+    # answer = response.text
+    # print(f"response: {response}")
+    # print(f"answer: {answer}")
 
-    # Step 5: Store assistant reply
+    # # Step 5: Store assistant reply
+    # assistant_msg = {
+    #     "id": str(uuid4()),
+    #     "user": user["phone"],
+    #     "role": "assistant",
+    #     "message": answer,
+    #     "timestamp": datetime.utcnow().isoformat()
+    # }
+    # chats_container.upsert_item(assistant_msg)
+
+    return {"formatted": formatted}
+
+
+@app.post("/chat")
+async def chat_endpoint(request: Request):
+    data = await request.json()
+    return await handle_chat_payload(data)
+
+
+@app.post("/receive-whatsapp")
+async def receive_whatsapp(request: Request):
+    form = await request.form()
+    from_number = form.get("From", "").replace("whatsapp:", "")
+    num_media = int(form.get("NumMedia", 0))
+    message_body = form.get("Body", "")
+    print(f"data: {form}")
+    print(f"from_number: {from_number}")
+    print(f"num_media: {num_media}")
+    print(f"message_body: {message_body}")
+
+    # Forward to chat handler
+    chat_data = {
+        "owner": {"phone": from_number},
+        "message": message_body
+    }
+    chat_formatted = await handle_chat_payload(chat_data)
+    formatted = chat_formatted["answer"]
+    answer = "LLM call failed"
+
+    try:
+        if num_media > 0:
+            media_url = form.get("MediaUrl0")
+            media_type = form.get("MediaContentType0")
+
+            media_response = requests.get(media_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
+            image_bytes = media_response.content
+
+            blob_name = f"{from_number}_{datetime.utcnow().isoformat()}_{uuid4()}.jpg"
+            blob_client = user_images_client.get_blob_client(blob_name)
+            blob_client.upload_blob(image_bytes, overwrite=True)
+
+            gemini_response = image_model.generate_content([
+                {"text": formatted or "Describe this image"},
+                {"inline_data": {"mime_type": media_type, "data": image_bytes}}
+            ])
+            answer = gemini_response.text
+        else:
+            response = model.generate_content(formatted)
+            answer = response.text
+    except Exception as e:
+        print(f"Gemini processing failed: {e}")
+        answer = "Sorry, I couldn't process your message or image."
+
     assistant_msg = {
         "id": str(uuid4()),
-        "user": user,
+        "user": from_number,
         "role": "assistant",
         "message": answer,
         "timestamp": datetime.utcnow().isoformat()
     }
     chats_container.upsert_item(assistant_msg)
 
-    return {"answer": answer}
-
-@app.post("/receive-whatsapp")
-async def receive_whatsapp(request: Request):
-    data = await request.form()
-    from_number = data.get("From").replace("whatsapp:", "")
-    num_media = int(data.get("NumMedia", 0))
-    message_body = data.get("Body")
-
-    # Forward to chat handler
-    chat_response = await handle_chat(Request(scope={"type": "http"}, receive=lambda: None))
-    answer = chat_response["answer"]
-
-    try:
-        if num_media > 0:
-            media_url = data.get("MediaUrl0")
-            media_type = data.get("MediaContentType0")
-
-            # Download media from Twilio
-            media_response = requests.get(media_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
-            image_bytes = media_response.content
-
-            # Send image to Gemini
-            gemini_response = image_model.generate_content([
-                {"text": message_body or "Describe this image"},
-                {"inline_data": {"mime_type": media_type, "data": image_bytes}}
-            ])
-            answer = gemini_response.text
-        else:
-            # Text-only message
-            response = model.generate_content(message_body)
-            answer = response.text
-    except Exception as e:
-        print(f"Gemini processing failed: {e}")
-        answer = "Sorry, I couldn't process your message or image."
-
-    # Send reply via Twilio
     try:
         sent = client.messages.create(
             body=answer,
@@ -453,7 +589,8 @@ async def receive_whatsapp(request: Request):
         return {"status": "replied", "sid": sent.sid}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
-    
+
+
 @app.get("/chat-history")
 async def get_chat_history(user: str):
     query = f"SELECT * FROM c WHERE c.user = '{user}' ORDER BY c.timestamp ASC"
@@ -539,7 +676,7 @@ Soil Data:
     # Step 6: Store response
     analysis_doc = {
         "id": str(uuid4()),
-        "user": user,
+        "user": user['phone'],
         "role": "assistant",
         "message": answer,
         "timestamp": datetime.utcnow().isoformat()
@@ -556,7 +693,7 @@ Soil Data:
             from_=TWILIO_WHATSAPP_NUMBER,
             to="whatsapp:+" + user['phone']
         )
-        print(f"message sent")
+        print(f"message sent; ", sent)
     except Exception as e:
         print(f"status: ", "error sending message ", "detail: ", str(e))
 
