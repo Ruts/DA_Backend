@@ -46,10 +46,10 @@ RECOMMENDATION_PROMPS = os.getenv("RECOMMENDATION_PROMPS")
 SUMMARIZE = os.getenv("SUMMARIZE")
 
 genai.configure(api_key = os.getenv("GOOGLE_API_KEY"))
-model = genai.GenerativeModel("gemini-1.5-flash")  # or "gemini-1.5-pro"
-image_model = genai.GenerativeModel("gemini-2.5-flash-image-preview")  # for image input
+model = genai.GenerativeModel("gemini-1.5-flash") 
+image_model = genai.GenerativeModel("gemini-2.5-flash-image-preview") 
 
-# Twilio credentials (use environment variables in production)
+# Twilio credentials
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
 TWILIO_WHATSAPP_NUMBER = os.getenv("TWILIO_WHATSAPP_NUMBER")
@@ -58,7 +58,6 @@ client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
 app = FastAPI()
 
-# At the top of your FastAPI file
 latest_whatsapp_message = {"from": "", "message": ""}
 
 TOKEN_SECRET_KEY = os.getenv("TOKEN_SECRET_KEY")
@@ -101,6 +100,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# API to send question to LLM
 @app.post("/ask")
 async def ask_question(request: Request):
     data = await request.json()
@@ -111,6 +111,7 @@ async def ask_question(request: Request):
 
     return {"answer": answer}
 
+# API to send messages to WhatsApp API
 @app.post("/send-whatsapp")
 async def send_whatsapp(request: Request):
     data = await request.json()
@@ -127,6 +128,7 @@ async def send_whatsapp(request: Request):
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
+# API to fecth the latest whatsapp messages
 @app.get("/latest-whatsapp")
 async def get_latest_whatsapp():
     return latest_whatsapp_message
@@ -140,6 +142,7 @@ def send_verification_code(phone_number):
     )
     return code
 
+# API to create anew account
 @app.post("/create-account")
 async def create_account(request: Request):
     data = await request.json()
@@ -158,6 +161,7 @@ async def create_account(request: Request):
 
     return {"status": "code_sent"}
     
+# API to log in to app
 @app.post("/login")
 async def login(request: Request):
     print(f"request: {request}")
@@ -189,6 +193,7 @@ def create_token(data: dict):
     to_encode["exp"] = datetime.utcnow() + timedelta(hours=24)
     return jwt.encode(to_encode, TOKEN_SECRET_KEY, algorithm=TOKEN_ALGORITHM)
 
+# API to verify thecode sent
 @app.post("/verify-code")
 async def verify_code(request: Request):
     data = await request.json()
@@ -213,11 +218,13 @@ async def get_current_user(request: Request):
     token = auth_header.split(" ")[1]
     return verify_token(token)
 
+# API to get the name and number of the user
 @app.get("/dashboard-data")
 async def dashboard_data(user=Depends(get_current_user)):
     # `user` contains decoded JWT payload
     return {"message": f"Welcome {user['name']}!", "phone": user["phone"]}
 
+# API to add the farm data
 @app.post("/farms")
 async def create_farm(request: Request, user=Depends(get_current_user)):
     data = await request.json()
@@ -232,12 +239,14 @@ async def create_farm(request: Request, user=Depends(get_current_user)):
     farms_container.upsert_item(farm)
     return {"status": "created", "farm": farm}
 
+# API to get the farm data
 @app.get("/farms")
 async def get_user_farms(user=Depends(get_current_user)):
     query = f"SELECT * FROM c WHERE c.owner = '{user['phone']}'"
     farms = list(farms_container.query_items(query, enable_cross_partition_query=True))
     return farms
 
+# API to add a harvest
 @app.post("/harvests")
 async def add_harvest(request: Request, user=Depends(get_current_user)):
     data = await request.json()
@@ -252,11 +261,13 @@ async def add_harvest(request: Request, user=Depends(get_current_user)):
     harvests_container.upsert_item(harvest)
     return {"status": "saved", "harvest": harvest}
 
+# API to fetch harvest data
 @app.get("/harvests")
 async def get_user_harvests(user=Depends(get_current_user)):
     query = f"SELECT * FROM c WHERE c.owner = '{user['phone']}'"
     return list(harvests_container.query_items(query, enable_cross_partition_query=True))
 
+# API to add environmental conditions
 @app.post("/environments")
 async def add_environmental_data(request: Request, user=Depends(get_current_user)):
     data = await request.json()
@@ -272,11 +283,13 @@ async def add_environmental_data(request: Request, user=Depends(get_current_user
     environments_container.upsert_item(record)
     return {"status": "saved", "data": record}
 
+# API to fetch th environment data
 @app.get("/environments")
 async def get_environmental_data(user=Depends(get_current_user)):
     query = f"SELECT * FROM c WHERE c.owner = '{user['phone']}'"
     return list(environments_container.query_items(query, enable_cross_partition_query=True))
 
+# API to add farm grid images
 @app.post("/grid-images")
 async def upload_multiple_grid_images(
     farmId: str = Form(...),
@@ -305,6 +318,7 @@ async def upload_multiple_grid_images(
     await analyze_farm_day(farmId, dateUploaded)
     return {"status": "uploaded", "imageUrl": image_urls}
 
+# API to fetch farm grid images
 @app.get("/grid-images")
 async def get_grid_images(user=Depends(get_current_user)):
     query = f"SELECT * FROM c WHERE c.owner = '{user['phone']}'"
@@ -321,6 +335,7 @@ async def get_grid_images(user=Depends(get_current_user)):
 
     return items
 
+# API to generate a url to fetch images for farm images
 def generate_sas_url(blob_name: str) -> str:
     sas_token = generate_blob_sas(
         account_name="dafarmimages",
@@ -333,6 +348,20 @@ def generate_sas_url(blob_name: str) -> str:
     url_base = os.getenv("IMAGE_STORAGE_URL")
     return f"{url_base}/{blob_name}?{sas_token}"
 
+# API to generate a url to fetch user submitted images
+def generate_sas_url_user_image(blob_name: str) -> str:
+    sas_token = generate_blob_sas(
+        account_name="dafarmimages",
+        container_name="user-images",
+        blob_name=blob_name,
+        account_key=DA_FARM_IMAGES_KEY,
+        permission=BlobSasPermissions(read=True),
+        expiry=datetime.utcnow() + timedelta(hours=1)
+    )
+    url_base = os.getenv("USER_IMAGE_STORAGE_URL")
+    return f"{url_base}/{blob_name}?{sas_token}"
+
+# API to add soil monitoring data
 @app.post("/soil-samples")
 async def store_soil_sample(sample: SoilSample, user=Depends(get_current_user)):
     print(f"sample: {sample}")
@@ -346,6 +375,7 @@ async def store_soil_sample(sample: SoilSample, user=Depends(get_current_user)):
     await analyze_farm_day(sample["farmId"], sample["date"])
     return {"status": "stored"}
 
+# API to get soil data
 @app.get("/soil-samples")
 async def get_soil_samples(
     farmId: Optional[str] = Query(None),
@@ -371,123 +401,13 @@ def serialize_dates(obj):
             obj[key] = value.isoformat()
     return obj
 
-# @app.post("/chat")
-# async def handle_chat(request: Request):
-#     data = await request.json()
-#     user = data.get("owner")  # e.g. "+254712345678"
-#     message = data.get("message")
-#     print(f"data: {data}")
-#     print(f"user: {user}")
-#     print(f"message: {message}")
-
-#     # Step 1: Store incoming message
-#     user_msg = {
-#         "id": str(uuid4()),
-#         "user": user["phone"],
-#         "role": "user",
-#         "message": message,
-#         "timestamp": datetime.utcnow().isoformat()
-#     }
-#     chats_container.upsert_item(user_msg)
-
-#     # Step 2: Fetch full history
-#     query = f"SELECT * FROM c WHERE c.user = '{user}' ORDER BY c.timestamp ASC"
-#     history = list(chats_container.query_items(query, enable_cross_partition_query=True))
-
-#     # Step 3: Format for LLM
-#     formatted = [{"role": h["role"], "content": h["message"]} for h in history]
-
-#     # Step 4: Send to LLM
-#     response = model.generate_content(formatted)
-#     answer = response.text
-#     print(f"response: {response}")
-#     print(f"answer: {answer}")
-
-#     # Step 5: Store assistant reply
-#     assistant_msg = {
-#         "id": str(uuid4()),
-#         "user": user["phone"],
-#         "role": "assistant",
-#         "message": answer,
-#         "timestamp": datetime.utcnow().isoformat()
-#     }
-#     chats_container.upsert_item(assistant_msg)
-
-#     return {"answer": answer}
-
-# @app.post("/receive-whatsapp")
-# async def receive_whatsapp(request: Request):
-#     data = await request.form()
-#     from_number = data.get("From").replace("whatsapp:", "")
-#     num_media = int(data.get("NumMedia", 0))
-#     message_body = data.get("Body")
-#     print(f"data: {data}")
-#     print(f"from_number: {from_number}")
-#     print(f"num_media: {num_media}")
-#     print(f"message_body: {message_body}")
-
-#     # Forward to chat handler
-#     chat_response = await handle_chat(Request(scope={"type": "http"}, receive=lambda: None))
-#     answer = chat_response["answer"]
-#     print(f"chat_response: {chat_response}")
-#     print(f"answer: {answer}")
-
-#     try:
-#         if num_media > 0:
-#             media_url = data.get("MediaUrl0")
-#             media_type = data.get("MediaContentType0")
-
-#             # Download media from Twilio
-#             media_response = requests.get(media_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
-#             image_bytes = media_response.content
-
-#             # Send image to Gemini
-#             gemini_response = image_model.generate_content([
-#                 {"text": message_body or "Describe this image"},
-#                 {"inline_data": {"mime_type": media_type, "data": image_bytes}}
-#             ])
-#             answer = gemini_response.text
-#         else:
-#             # Text-only message
-#             response = model.generate_content(message_body)
-#             answer = response.text
-#     except Exception as e:
-#         print(f"Gemini processing failed: {e}")
-#         answer = "Sorry, I couldn't process your message or image."
-
-#     # Send reply via Twilio
-#     try:
-#         sent = client.messages.create(
-#             body=answer,
-#             from_=TWILIO_WHATSAPP_NUMBER,
-#             to="whatsapp:" + from_number
-#         )
-#         return {"status": "replied", "sid": sent.sid}
-#     except Exception as e:
-#         return {"status": "error", "detail": str(e)}
-    
-# @app.get("/chat-history")
-# async def get_chat_history(user: str):
-#     query = f"SELECT * FROM c WHERE c.user = '{user}' ORDER BY c.timestamp ASC"
-#     history = list(chats_container.query_items(query, enable_cross_partition_query=True))
-#     return history
-
+# Method to handle chat data before upload
 async def handle_chat_payload(data: dict):
     user = data.get("owner")  # e.g. "+254712345678"
     message = data.get("message")
     print(f"data: {data}")
     print(f"user: {user}")
     print(f"message: {message}")
-
-    # Step 1: Store incoming message
-    user_msg = {
-        "id": str(uuid4()),
-        "user": user["phone"],
-        "role": "user",
-        "message": message,
-        "timestamp": datetime.utcnow().isoformat()
-    }
-    chats_container.upsert_item(user_msg)
 
     # Step 2: Fetch full history
     phone = user["phone"]
@@ -500,37 +420,36 @@ async def handle_chat_payload(data: dict):
         {"role": h["role"], "parts": [{"text": h["message"]}]}
         for h in history
     ]
+
+    formatted = ""
+    for h in history:
+        formatted = formatted + " role: " + h["role"] + " text: " + h["message"] + " timestamp: " + h["timestamp"] + "\n"
+
     print(f"formatted: {formatted}")
 
-    # # Step 4: Send to LLM
-    # response = model.generate_content(formatted)
-    # answer = response.text
-    # print(f"response: {response}")
-    # print(f"answer: {answer}")
-
-    # # Step 5: Store assistant reply
-    # assistant_msg = {
-    #     "id": str(uuid4()),
-    #     "user": user["phone"],
-    #     "role": "assistant",
-    #     "message": answer,
-    #     "timestamp": datetime.utcnow().isoformat()
-    # }
-    # chats_container.upsert_item(assistant_msg)
+    # Step 1: Store incoming message
+    user_msg = {
+        "id": str(uuid4()),
+        "user": user["phone"],
+        "role": "user",
+        "message": message,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    chats_container.upsert_item(user_msg)
 
     return {"formatted": formatted}
 
-
+# API to add chat data
 @app.post("/chat")
 async def chat_endpoint(request: Request):
     data = await request.json()
     return await handle_chat_payload(data)
 
-
+# API to manage received whatsapp messages
 @app.post("/receive-whatsapp")
 async def receive_whatsapp(request: Request):
     form = await request.form()
-    from_number = form.get("From", "").replace("whatsapp:", "")
+    from_number = form.get("From", "").replace("whatsapp:+", "")
     num_media = int(form.get("NumMedia", 0))
     message_body = form.get("Body", "")
     print(f"data: {form}")
@@ -544,11 +463,44 @@ async def receive_whatsapp(request: Request):
         "message": message_body
     }
     chat_formatted = await handle_chat_payload(chat_data)
-    formatted = chat_formatted["answer"]
+    formatted = "\n".join([
+        f"Answer the users Current message. Chat history has been included for context only",
+        f"Chat History: {chat_formatted["formatted"]}",
+        f"Current message: {message_body}"
+    ])
     answer = "LLM call failed"
+    print(f"answer: {answer}")
+    print(f"formatted: {formatted}")
+
+    image_urls = []
+    media_descriptions = []
+
+    for i in range(num_media):
+        media_url = form.get(f"MediaUrl{i}")
+        media_type = form.get(f"MediaContentType{i}")
+
+        try:
+            media_response = requests.get(media_url, auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN))
+            image_bytes = media_response.content
+
+            blob_name = f"{from_number}_{datetime.utcnow().isoformat()}_{uuid4()}.jpg"
+            blob_client = user_images_client.get_blob_client(blob_name)
+            blob_client.upload_blob(image_bytes, overwrite=True)
+
+            sas_url = generate_sas_url_user_image(blob_name)
+            image_urls.append(sas_url)
+            media_descriptions.append(f"Image {i+1}: {sas_url} (type: {media_type})")
+
+        except Exception as e:
+            print(f"Failed to process media {i}: {e}")
+
+    # Build message for Gemini
+    full_message = f"{formatted}\n\nAttached images:\n" + "\n".join(media_descriptions)
+    print(f"full_message: {full_message}")
 
     try:
         if num_media > 0:
+
             media_url = form.get("MediaUrl0")
             media_type = form.get("MediaContentType0")
 
@@ -560,13 +512,22 @@ async def receive_whatsapp(request: Request):
             blob_client.upload_blob(image_bytes, overwrite=True)
 
             gemini_response = image_model.generate_content([
-                {"text": formatted or "Describe this image"},
-                {"inline_data": {"mime_type": media_type, "data": image_bytes}}
+                {
+                    "role": "user",
+                    "parts": [
+                        {"text": full_message or "Describe this image"},
+                        {"inline_data": {
+                            "mime_type": media_type,
+                            "data": image_bytes
+                        }}
+                    ]
+                }
             ])
             answer = gemini_response.text
         else:
             response = model.generate_content(formatted)
             answer = response.text
+
     except Exception as e:
         print(f"Gemini processing failed: {e}")
         answer = "Sorry, I couldn't process your message or image."
@@ -579,24 +540,30 @@ async def receive_whatsapp(request: Request):
         "timestamp": datetime.utcnow().isoformat()
     }
     chats_container.upsert_item(assistant_msg)
+    print(f"final answer: {answer}")
 
     try:
         sent = client.messages.create(
             body=answer,
             from_=TWILIO_WHATSAPP_NUMBER,
-            to="whatsapp:" + from_number
+            to="whatsapp:+" + from_number
         )
         return {"status": "replied", "sid": sent.sid}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
-
-
+    
+# API to fech chat history
 @app.get("/chat-history")
-async def get_chat_history(user: str):
-    query = f"SELECT * FROM c WHERE c.user = '{user}' ORDER BY c.timestamp ASC"
+async def get_chat_history(user=Depends(get_current_user)):
+    print(f"user: {user}")
+    phone = user["phone"]
+    query = f"SELECT * FROM c WHERE c.user = '{phone}' ORDER BY c.timestamp ASC"
+    print(f"query: {query}")
     history = list(chats_container.query_items(query, enable_cross_partition_query=True))
+    print(f"history: {history}")
     return history
 
+# API to analyse farm data
 @app.post("/analyze-farm-day")
 async def analyze_farm_day(
     farmId: str = Form(...),
@@ -605,13 +572,13 @@ async def analyze_farm_day(
 ):
     print(f"farmId: {farmId}")
     print(f"date: {date}")
-    # Step 1: Fetch grid images
+    
     img_query = f"""
         SELECT * FROM c WHERE c.owner = '{user['phone']}' AND c.farmId = '{farmId}' AND c.date = '{date}'
     """
     images = list(grid_container.query_items(img_query, enable_cross_partition_query=True))
 
-    # Step 2: Fetch soil samples
+
     soil_query = f"""
         SELECT * FROM c WHERE c.owner = '{user['phone']}' AND c.farmId = '{farmId}' AND c.date = '{date}'
     """
@@ -620,14 +587,14 @@ async def analyze_farm_day(
     if not images or not soil:
         return {"status": "incomplete", "message": "Missing either grid images or soil data for this date."}
 
-    # Step 3: Generate SAS URLs
+
     image_urls = []
     for img in images:
         for url in img["imageUrl"]:
             blob_name = url.split("/")[-1].split("?")[0]
             image_urls.append(generate_sas_url(blob_name))
 
-    # Step 4: Build prompt
+
     role_prompt = os.getenv("ROLE_PROMPT")
     image_prompt = os.getenv("IMAGE_ANALYSIS_PROMPTS")
     soil_prompt = os.getenv("SOIL_MONITORING_PROMPTS")
@@ -666,14 +633,20 @@ Soil Data:
 
 {recommendation_prompt}
     """
+    user_msg = {
+        "id": str(uuid4()),
+        "user": user["phone"],
+        "role": "user",
+        "message": full_prompt,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    chats_container.upsert_item(user_msg)
 
-    # Step 5: Send to Google LLM
     print(f"full_prompt: {full_prompt}")
     response = model.generate_content(full_prompt)
     answer = response.text
     print(f"answer: {answer}")
 
-    # Step 6: Store response
     analysis_doc = {
         "id": str(uuid4()),
         "user": user['phone'],
@@ -687,6 +660,15 @@ Soil Data:
     answerSummary = responseSummary.text
     print(f"answerSummary: {answerSummary}")
 
+    analysis_doc = {
+        "id": str(uuid4()),
+        "user": user['phone'],
+        "role": "assistant",
+        "message": "Answer Summary: " + answerSummary,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    chats_container.upsert_item(analysis_doc)
+
     try:
         sent = client.messages.create(
             body=answerSummary,
@@ -695,6 +677,12 @@ Soil Data:
         )
         print(f"message sent; ", sent)
     except Exception as e:
+        sent = client.messages.create(
+            body="Error sending message. try again.",
+            from_=TWILIO_WHATSAPP_NUMBER,
+            to="whatsapp:+" + user['phone']
+        )
+        print(f"message sent; ", sent)
         print(f"status: ", "error sending message ", "detail: ", str(e))
 
     return {"status": "complete", "response": answer}
