@@ -1,5 +1,7 @@
 # 🌱 Digital Agronomist API
 
+Available at: https://dabackend-c8fcgxdhdyfff7am.canadacentral-01.azurewebsites.net/
+
 This project is a FastAPI-based backend designed for digital agriculture platforms.
 It integrates soil monitoring, crop advisory, farm management, image analysis, and WhatsApp-based farmer communication using Google Gemini LLMs, Twilio, and Azure services.
 
