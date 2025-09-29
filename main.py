@@ -465,7 +465,7 @@ async def receive_whatsapp(request: Request):
     chat_formatted = await handle_chat_payload(chat_data)
     formatted = "\n".join([
         f"Answer the users Current message. Chat history has been included for context only",
-        f"Chat History: {chat_formatted["formatted"]}",
+        f"Chat History: {chat_formatted['formatted']}",
         f"Current message: {message_body}"
     ])
     answer = "LLM call failed"
