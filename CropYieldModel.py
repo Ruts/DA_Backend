@@ -13,6 +13,7 @@ from sklearn.compose import ColumnTransformer
 import requests
 from io import BytesIO
 from urllib.parse import urlparse
+import joblib
 
 # --- CONFIG ---
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -99,16 +100,22 @@ def preprocess_soil(df):
     soil_array = ct.fit_transform(soil_features)
     return soil_array, ct
 
-# --- TRAIN MODELS PER CROP ---
 def train_models(df, soil_array, ct):
     os.makedirs(MODEL_DIR, exist_ok=True)
     models_by_crop = {}
+    target_scalers = {}
+
     for crop in df["crop_type"].unique():
         crop_df = df[df["crop_type"] == crop].reset_index(drop=True)
         soil = torch.tensor(soil_array[crop_df.index], dtype=torch.float32).to(DEVICE)
+
         feats = np.array([extract_image_features(paths) for paths in crop_df["image_paths"]])
         img_feats = torch.from_numpy(feats).float().to(DEVICE)
-        y = torch.tensor(crop_df["yield_per_acre"].values, dtype=torch.float32).unsqueeze(1).to(DEVICE)
+
+        y_raw = crop_df["yield_per_acre"].values.reshape(-1, 1)
+        y_scaler = StandardScaler()
+        y_scaled = y_scaler.fit_transform(y_raw)
+        y = torch.tensor(y_scaled, dtype=torch.float32).to(DEVICE)
 
         model = YieldPredictor(soil.shape[1]).to(DEVICE)
         optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
@@ -123,8 +130,11 @@ def train_models(df, soil_array, ct):
             optimizer.step()
 
         models_by_crop[crop] = model
+        target_scalers[crop] = y_scaler
+        joblib.dump(y_scaler, f"{MODEL_DIR}/{crop}_scaler.pkl")
         torch.save(model.state_dict(), f"{MODEL_DIR}/{crop}_model.pt")
-    return models_by_crop, ct
+
+    return models_by_crop, ct, target_scalers
 
 def load_preprocessing(csv_path):
     df = pd.read_csv(csv_path)
@@ -154,17 +164,20 @@ def load_models(df, soil_array):
         models_by_crop[crop] = model
     return models_by_crop
 
-# --- PREDICT YIELD ---
-def predict_yield(new_soil_dict, new_image_paths, crop_type, models_by_crop, ct):
+def predict_yield(new_soil_dict, new_image_paths, crop_type, models_by_crop, ct, target_scalers):
     soil_df = pd.DataFrame([new_soil_dict])
     soil_array = ct.transform(soil_df)
     soil_tensor = torch.tensor(soil_array, dtype=torch.float32).to(DEVICE)
+
     img_feat = torch.tensor(extract_image_features(new_image_paths), dtype=torch.float32).unsqueeze(0).to(DEVICE)
 
     model = models_by_crop[crop_type]
     with torch.no_grad():
-        pred = model(soil_tensor, img_feat)
-    return pred.item()
+        pred_scaled = model(soil_tensor, img_feat).cpu().numpy()
+
+    # Convert back to original yield scale
+    yield_kg = target_scalers[crop_type].inverse_transform(pred_scaled)[0][0]
+    return yield_kg
 
 def recommend_soil_changes(model, new_soil_dict, ct):
     soil_df = pd.DataFrame([new_soil_dict])
@@ -191,19 +204,23 @@ if __name__ == "__main__":
 
     # Train and save models if not already saved
     if not os.path.exists(f"{MODEL_DIR}/Maize_model.pt"):
-        models_by_crop, ct = train_models(df, soil_array, ct)
+        models_by_crop, ct, target_scalers = train_models(df, soil_array, ct)
     else:
         models_by_crop = load_models(df, soil_array)
+        target_scalers = {}
+        for crop in df["crop_type"].unique():
+            scaler = joblib.load(f"{MODEL_DIR}/{crop}_scaler.pkl")
+            target_scalers[crop] = scaler
 
     # Example prediction
     new_soil = {
-        "pH": 1.2, "electricalConductivity": 3.8, "organicMatter": 45,
-        "nitrogen": 12, "phosphorus": 30, "potassium": 1500, "calcium": 120,
-        "magnesium": 18, "sulfur": 3.2, "zinc": 5.6, "iron": 5.2,
-        "soilTexture": "Loam", "moistureContent": 22.3
+        "pH": 6.5, "electricalConductivity": 1.75, "organicMatter": 4.6,
+        "nitrogen": 71, "phosphorus": 21, "potassium": 43, "calcium": 2125,
+        "magnesium": 145, "sulfur": 26, "zinc": 4.0, "iron": 5.7,
+        "soilTexture": "Sandy Loam", "moistureContent": 27.1
     }
     new_images = ["data/images/maize_25_03_16_01.png", "data/images/maize_25_03_16_02.png"]
-    predicted_yield = predict_yield(new_soil, new_images, "maize", models_by_crop, ct)
+    predicted_yield = predict_yield(new_soil, new_images, "maize", models_by_crop, ct, target_scalers)
     print(f"Predicted Maize Yield: {predicted_yield:.2f} kg")
 
     # Optional: visualize soil impact

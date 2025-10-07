@@ -17,12 +17,14 @@ from pydantic import BaseModel
 from typing import Optional
 from dotenv import load_dotenv
 import CropYieldModel as model_utils
+import joblib
 
 app = FastAPI(title="Crop Yield Predictor")
 
 # Load preprocessing and models once
 ct, crops, soil_dim = model_utils.load_preprocessing("data/soil_data.csv")
 models_by_crop = model_utils.load_models(crops, soil_dim)
+MODEL_DIR = "saved_models"
 
 # Class for storing data used in yields prediction
 class SoilInput(BaseModel):
@@ -750,10 +752,13 @@ def predict_yield(input: SoilInput):
     return predict_yield_method(input)
 
 def predict_yield_method(input: SoilInput) -> str:
+    print(f"input; ", input)
     model = models_by_crop.get(input.crop_type)
     if not model:
         return {"error": f"No model found for crop type: {input.crop_type}"}
     soil_dict = input.dict(exclude={"crop_type", "image_paths"})
-    yield_kg = model_utils.predict_yield(soil_dict, input.image_paths, input.crop_type, models_by_crop, ct)
-    # predicted_yield = predict_yield(new_soil, new_images, "maize", models_by_crop, ct)
+    target_scalers = {}
+    scaler = joblib.load(f"{MODEL_DIR}/{input.crop_type}_scaler.pkl")
+    target_scalers[input.crop_type] = scaler
+    yield_kg = model_utils.predict_yield(soil_dict, input.image_paths, input.crop_type, models_by_crop, ct, target_scalers)
     return {"predicted_yield_kg": round(yield_kg, 2)}
