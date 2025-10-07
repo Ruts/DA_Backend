@@ -1,5 +1,7 @@
 # 🌱 Digital Agronomist API
 
+Available at: https://dabackend-c8fcgxdhdyfff7am.canadacentral-01.azurewebsites.net/
+
 This project is a FastAPI-based backend designed for digital agriculture platforms.
 It integrates soil monitoring, crop advisory, farm management, image analysis, and WhatsApp-based farmer communication using Google Gemini LLMs, Twilio, and Azure services.
 
@@ -167,6 +169,9 @@ POST /receive-whatsapp → Receive and auto-reply to WhatsApp messages.
 
 GET /latest-whatsapp → Get latest WhatsApp message.
 
+### Crop Yield Prediction
+POST /predict → Predict crop yield from soil data and aerial images using prebuild models
+
 ## 🔐 Security Notes
 
 Always store secrets in .env, never in code.
@@ -184,3 +189,44 @@ Offline-first support for rural deployments.
 Integration with satellite NDVI imagery.
 
 Advanced analytics dashboards.
+
+
+# 🌾 Crop Yield Prediction from Soil and Aerial Image Data
+
+The second file called CropYieldModel implements a crop-specific AI model using PyTorch and SHAP to predict crop yield (in kilograms) based on soil metrics and aerial field images. It supports multiple crop types and provides explainability via SHAP to recommend soil improvements.
+
+---
+
+## 🚀 Features
+
+- **Crop-Specific Yield Models**: Trains separate models for each crop type (e.g., Maize, Beans).
+- **Image Feature Extraction**: Uses ResNet18 to extract features from aerial grid images.
+- **Soil Feature Preprocessing**: Encodes soil texture and scales numeric features.
+- **Yield Prediction**: Combines soil and image features to predict expected yield.
+- **SHAP Explainability**: Visualizes soil feature importance to guide agronomic decisions.
+- **Model Persistence**: Saves and loads trained models per crop to avoid retraining.
+
+---
+
+## 📁 File Overview
+
+- `YieldPredictor`: PyTorch model combining soil and image features.
+- `extract_image_features`: Loads and processes aerial images using ResNet18.
+- `load_dataset`: Loads CSV data and parses image paths.
+- `preprocess_soil`: Encodes and scales soil features using `ColumnTransformer`.
+- `train_models`: Trains and saves models per crop type.
+- `load_models`: Loads saved models from disk.
+- `predict_yield`: Predicts yield for new soil and image inputs.
+- `recommend_soil_changes`: Uses SHAP to visualize soil feature impact.
+- `main`: Executes training, prediction, and SHAP visualization.
+
+---
+
+## 🧪 Example CSV Format
+
+The input CSV (`data/soil_data.csv`) should contain:
+
+```csv
+date,pH,electricalConductivity,organicMatter,nitrogen,phosphorus,potassium,calcium,magnesium,sulfur,zinc,iron,soilTexture,moistureContent,crop_type,yield,image_paths
+2025-03-15,6.5,1.2,3.8,45,12,30,1500,120,18,3.2,5.6,Loam,22.3,Maize,4.0,"['data/images/maize_01.png','data/images/maize_02.png']"
+
