@@ -1,6 +1,6 @@
 --find-links https://download.pytorch.org/whl/torch_stable.html
 fastapi>=0.110.0
-uvicorn[standard]>=0.22.0
+uvicorn[standard]
 gunicorn>=21.2.0
 google-generativeai
 twilio
