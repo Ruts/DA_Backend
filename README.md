@@ -169,6 +169,9 @@ POST /receive-whatsapp → Receive and auto-reply to WhatsApp messages.
 
 GET /latest-whatsapp → Get latest WhatsApp message.
 
+### Crop Yield Prediction
+POST /predict → Predict crop yield from soil data and aerial images using prebuild models
+
 ## 🔐 Security Notes
 
 Always store secrets in .env, never in code.
