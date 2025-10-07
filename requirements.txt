@@ -17,4 +17,4 @@ pandas
 numpy
 scikit-learn
 shap
-requests>=2.31.0
+requests
