@@ -10,3 +10,11 @@ python-jose
 azure.storage.blob
 pydantic==1.10.13
 dotenv
+torch
+torchvision
+opencv-python
+pandas
+numpy
+scikit-learn
+shap
+requests>=2.31.0

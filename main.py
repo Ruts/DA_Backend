@@ -16,7 +16,33 @@ from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPerm
 from pydantic import BaseModel
 from typing import Optional
 from dotenv import load_dotenv
+import CropYieldModel as model_utils
 
+app = FastAPI(title="Crop Yield Predictor")
+
+# Load preprocessing and models once
+ct, crops, soil_dim = model_utils.load_preprocessing("data/soil_data.csv")
+models_by_crop = model_utils.load_models(crops, soil_dim)
+
+# Class for storing data used in yields prediction
+class SoilInput(BaseModel):
+    pH: float
+    electricalConductivity: float
+    organicMatter: float
+    nitrogen: float
+    phosphorus: float
+    potassium: float
+    calcium: float
+    magnesium: float
+    sulfur: float
+    zinc: float
+    iron: float
+    soilTexture: str
+    moistureContent: float
+    crop_type: str
+    image_paths: List[str]
+
+# Class for storing data used when saving the data to the DB
 class SoilSample(BaseModel):
     id:str
     farmId: str
@@ -46,7 +72,7 @@ RECOMMENDATION_PROMPS = os.getenv("RECOMMENDATION_PROMPS")
 SUMMARIZE = os.getenv("SUMMARIZE")
 
 genai.configure(api_key = os.getenv("GOOGLE_API_KEY"))
-model = genai.GenerativeModel("gemini-1.5-flash") 
+model = genai.GenerativeModel("gemini-2.5-flash")
 image_model = genai.GenerativeModel("gemini-2.5-flash-image-preview") 
 
 # Twilio credentials
@@ -572,12 +598,14 @@ async def analyze_farm_day(
 ):
     print(f"farmId: {farmId}")
     print(f"date: {date}")
+
+    farm_query = f"SELECT * FROM c WHERE c.owner = '{user['phone']}' AND c.id = '{farmId}'"
+    farms = list(farms_container.query_items(farm_query, enable_cross_partition_query=True))
     
     img_query = f"""
         SELECT * FROM c WHERE c.owner = '{user['phone']}' AND c.farmId = '{farmId}' AND c.date = '{date}'
     """
     images = list(grid_container.query_items(img_query, enable_cross_partition_query=True))
-
 
     soil_query = f"""
         SELECT * FROM c WHERE c.owner = '{user['phone']}' AND c.farmId = '{farmId}' AND c.date = '{date}'
@@ -585,8 +613,8 @@ async def analyze_farm_day(
     soil = list(soil_container.query_items(soil_query, enable_cross_partition_query=True))
 
     if not images or not soil:
+        print(f"not images or not soil")
         return {"status": "incomplete", "message": "Missing either grid images or soil data for this date."}
-
 
     image_urls = []
     for img in images:
@@ -594,12 +622,12 @@ async def analyze_farm_day(
             blob_name = url.split("/")[-1].split("?")[0]
             image_urls.append(generate_sas_url(blob_name))
 
-
     role_prompt = os.getenv("ROLE_PROMPT")
     image_prompt = os.getenv("IMAGE_ANALYSIS_PROMPTS")
     soil_prompt = os.getenv("SOIL_MONITORING_PROMPTS")
     recommendation_prompt = os.getenv("RECOMMENDATION_PROMPS")
     summarize_prompt = os.getenv("SUMMARIZE")
+    predict_prompt = os.getenv("PREDICT")
 
     soil_data = soil[0]  # Assuming one sample per day
     soil_text = "\n".join([
@@ -618,6 +646,27 @@ async def analyze_farm_day(
         f"Moisture: {soil_data['moistureContent']}%"
     ])
 
+    soilInput = SoilInput(
+        pH=soil_data['pH'],
+        electricalConductivity=soil_data['electricalConductivity'],
+        organicMatter=soil_data['organicMatter'],
+        nitrogen=soil_data['nitrogen'],
+        phosphorus=soil_data['phosphorus'],
+        potassium=soil_data['potassium'],
+        calcium=soil_data['calcium'],
+        magnesium=soil_data['magnesium'],
+        sulfur=soil_data['sulfur'],
+        zinc=soil_data['zinc'],
+        iron=soil_data['iron'],
+        soilTexture=soil_data['soilTexture'],
+        moistureContent=soil_data['moistureContent'],
+        crop_type=farms[0]["crop"],
+        image_paths=image_urls
+    )
+
+    predicted_yield = predict_yield_method(soilInput)
+    print(f"predicted_yield: {predicted_yield}")
+
     full_prompt = f"""
 {role_prompt}
 
@@ -632,7 +681,10 @@ Soil Data:
 {soil_text}
 
 {recommendation_prompt}
+
+{predict_prompt}: {predicted_yield}
     """
+
     user_msg = {
         "id": str(uuid4()),
         "user": user["phone"],
@@ -642,10 +694,14 @@ Soil Data:
     }
     chats_container.upsert_item(user_msg)
 
-    print(f"full_prompt: {full_prompt}")
-    response = model.generate_content(full_prompt)
-    answer = response.text
-    print(f"answer: {answer}")
+    try:
+        print(f"full_prompt: {full_prompt}")
+        response = model.generate_content(full_prompt)
+        answer = response.text
+        print(f"answer: {answer}")
+    except Exception as e:
+        print(f"Content generation failed: {e}")
+        raise HTTPException(status_code=500, detail="AI generation failed")
 
     analysis_doc = {
         "id": str(uuid4()),
@@ -656,7 +712,8 @@ Soil Data:
     }
     chats_container.upsert_item(analysis_doc)
 
-    responseSummary = model.generate_content(answer + "\n\n Summarize the response in a formate suitable for a phone")
+    responseSummary = model.generate_content(summarize_prompt + ": " + answer)
+    print(f"summarize_prompt: {summarize_prompt}")
     answerSummary = responseSummary.text
     print(f"answerSummary: {answerSummary}")
 
@@ -687,3 +744,16 @@ Soil Data:
 
     return {"status": "complete", "response": answer}
 
+# API to predict crop yield based on soil monitoring and image data
+@app.post("/predict")
+def predict_yield(input: SoilInput):
+    return predict_yield_method(input)
+
+def predict_yield_method(input: SoilInput) -> str:
+    model = models_by_crop.get(input.crop_type)
+    if not model:
+        return {"error": f"No model found for crop type: {input.crop_type}"}
+    soil_dict = input.dict(exclude={"crop_type", "image_paths"})
+    yield_kg = model_utils.predict_yield(soil_dict, input.image_paths, input.crop_type, models_by_crop, ct)
+    # predicted_yield = predict_yield(new_soil, new_images, "maize", models_by_crop, ct)
+    return {"predicted_yield_kg": round(yield_kg, 2)}
