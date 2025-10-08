@@ -20,7 +20,8 @@ import pandas as pd
 import torch.nn as nn
 from torchvision.models import resnet18, ResNet18_Weights
 from torchvision import transforms
-import cv2
+from PIL import Image
+from io import BytesIO
 from urllib.parse import urlparse
 import numpy as np
 import ast
@@ -801,43 +802,59 @@ class YieldPredictor(nn.Module):
         soil_feat = self.soil_net(soil)
         combined = torch.cat((soil_feat, img), dim=1)
         return self.fusion(combined)
-
-# --- IMAGE FEATURE EXTRACTION ---
+    
 def extract_image_features(image_paths):
+    # Load ResNet model once (should be done outside the function for production)
+    # NOTE: Moved model loading inside for now, but best practice is to load globally.
     weights = ResNet18_Weights.DEFAULT
-    model = resnet18(weights=weights)
-    model.fc = nn.Identity()
-    model.eval().to(DEVICE)
+    model_resnet = resnet18(weights=weights)
+    model_resnet.fc = nn.Identity()
+    model_resnet.eval().to(DEVICE)
 
     transform = transforms.Compose([
-        transforms.ToPILImage(),
-        transforms.Resize(IMAGE_SIZE),
-        transforms.ToTensor()
+        # Pillow handles the PIL Image conversion naturally
+        transforms.Resize(IMAGE_SIZE), 
+        transforms.ToTensor(),
+        # Normalize with ResNet weights for proper feature extraction
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) 
     ])
 
     features = []
+    
     for path in image_paths:
-        # Check if path is a URL
         is_url = urlparse(path).scheme in ("http", "https")
+        img = None
+        
         if is_url:
             try:
-                response = requests.get(path, timeout=5)
+                # Use requests to get the content
+                response = requests.get(path, timeout=10)
                 response.raise_for_status()
-                img_array = np.asarray(bytearray(response.content), dtype=np.uint8)
-                img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+                
+                # Use Pillow to open the image from bytes
+                img = Image.open(BytesIO(response.content)).convert("RGB")
+                
             except Exception as e:
-                print(f"Failed to load image from URL {path}: {e}")
+                print(f"Failed to load image from URL {path} (Pillow decode failed): {e}")
                 continue
         else:
-            img = cv2.imread(path)
+            # Local file path - which should not happen in the Azure worker, but included for completeness
+            try:
+                img = Image.open(path).convert("RGB")
+            except Exception as e:
+                print(f"Image file not found locally: {path}: {e}")
+                continue
 
         if img is None:
-            print(f"Image not found or unreadable: {path}")
+            print(f"Image not loaded for path: {path}")
             continue
 
+        # Convert PIL Image to Tensor and extract features
         img_tensor = transform(img).unsqueeze(0).to(DEVICE)
+        
         with torch.no_grad():
-            feat = model(img_tensor).cpu().numpy()
+            # Use the renamed model variable
+            feat = model_resnet(img_tensor).cpu().numpy()
         features.append(feat[0])
 
     if not features:

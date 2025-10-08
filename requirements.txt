@@ -13,7 +13,6 @@ pydantic==1.10.13
 dotenv
 torch==2.3.1+cpu
 torchvision==0.18.1+cpu
-opencv-python-headless
 pandas
 numpy
 scikit-learn
