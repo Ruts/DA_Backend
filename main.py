@@ -6,8 +6,6 @@ import os
 import google.generativeai as genai
 from twilio.rest import Client
 import requests
-from io import BytesIO
-from PIL import Image
 from azure.cosmos import CosmosClient
 from jose import jwt, JWTError
 from datetime import date, datetime, timedelta
@@ -16,15 +14,25 @@ from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPerm
 from pydantic import BaseModel
 from typing import Optional
 from dotenv import load_dotenv
-import CropYieldModel as model_utils
 import joblib
+import torch
+import pandas as pd
+import torch.nn as nn
+from torchvision.models import resnet18, ResNet18_Weights
+from torchvision import transforms
+import cv2
+from urllib.parse import urlparse
+import numpy as np
+import ast
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
 
 app = FastAPI(title="Crop Yield Predictor")
 
 # Load preprocessing and models once
-ct, crops, soil_dim = model_utils.load_preprocessing("data/soil_data.csv")
-models_by_crop = model_utils.load_models(crops, soil_dim)
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 MODEL_DIR = "saved_models"
+IMAGE_SIZE = (128, 128)
 
 # Class for storing data used in yields prediction
 class SoilInput(BaseModel):
@@ -746,13 +754,100 @@ Soil Data:
 
     return {"status": "complete", "response": answer}
 
-# API to predict crop yield based on soil monitoring and image data
-@app.post("/predict")
-def predict_yield(input: SoilInput):
-    return predict_yield_method(input)
+def load_preprocessing(csv_path):
+    df = pd.read_csv(csv_path)
+    df.head()
+    df["image_paths"] = df["image_paths"].apply(ast.literal_eval)
+    soil_features = df.drop(columns=["date", "crop_type", "yield_per_acre", "image_paths"])
+    ct = ColumnTransformer([
+        ("texture", OneHotEncoder(), ["soilTexture"]),
+        ("num", StandardScaler(), soil_features.select_dtypes(include="number").columns.tolist())
+    ])
+    soil_array = ct.fit_transform(soil_features)
+    return ct, df, soil_array
+
+# --- LOAD MODELS ---
+def load_models(df, soil_array):
+    models_by_crop = {}
+    
+    if hasattr(soil_array, "shape"):
+        soil_dim = soil_array.shape[1]
+    else:
+        raise TypeError(f"Expected array-like input, got {type(soil_array)}: {soil_array}")
+
+    for crop in df["crop_type"].unique():
+        model = YieldPredictor(soil_dim).to(DEVICE)
+        model.load_state_dict(torch.load(f"{MODEL_DIR}/{crop}_model.pt"))
+        model.eval()
+        models_by_crop[crop] = model
+    return models_by_crop
+
+# --- MODEL ---
+class YieldPredictor(nn.Module):
+    def __init__(self, soil_dim, img_dim=512):
+        super().__init__()
+        self.soil_net = nn.Sequential(
+            nn.Linear(soil_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 32)
+        )
+        self.fusion = nn.Sequential(
+            nn.Linear(img_dim + 32, 32),
+            nn.ReLU(),
+            nn.Linear(32, 1)
+        )
+
+    def forward(self, soil, img):
+        soil_feat = self.soil_net(soil)
+        combined = torch.cat((soil_feat, img), dim=1)
+        return self.fusion(combined)
+
+# --- IMAGE FEATURE EXTRACTION ---
+def extract_image_features(image_paths):
+    weights = ResNet18_Weights.DEFAULT
+    model = resnet18(weights=weights)
+    model.fc = nn.Identity()
+    model.eval().to(DEVICE)
+
+    transform = transforms.Compose([
+        transforms.ToPILImage(),
+        transforms.Resize(IMAGE_SIZE),
+        transforms.ToTensor()
+    ])
+
+    features = []
+    for path in image_paths:
+        # Check if path is a URL
+        is_url = urlparse(path).scheme in ("http", "https")
+        if is_url:
+            try:
+                response = requests.get(path, timeout=5)
+                response.raise_for_status()
+                img_array = np.asarray(bytearray(response.content), dtype=np.uint8)
+                img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+            except Exception as e:
+                print(f"Failed to load image from URL {path}: {e}")
+                continue
+        else:
+            img = cv2.imread(path)
+
+        if img is None:
+            print(f"Image not found or unreadable: {path}")
+            continue
+
+        img_tensor = transform(img).unsqueeze(0).to(DEVICE)
+        with torch.no_grad():
+            feat = model(img_tensor).cpu().numpy()
+        features.append(feat[0])
+
+    if not features:
+        raise ValueError("No valid image features extracted.")
+    return np.mean(features, axis=0)
 
 def predict_yield_method(input: SoilInput) -> str:
     print(f"input; ", input)
+    ct, crops, soil_dim = load_preprocessing("data/soil_data.csv")
+    models_by_crop = load_models(crops, soil_dim)
     model = models_by_crop.get(input.crop_type)
     if not model:
         return {"error": f"No model found for crop type: {input.crop_type}"}
@@ -760,5 +855,22 @@ def predict_yield_method(input: SoilInput) -> str:
     target_scalers = {}
     scaler = joblib.load(f"{MODEL_DIR}/{input.crop_type}_scaler.pkl")
     target_scalers[input.crop_type] = scaler
-    yield_kg = model_utils.predict_yield(soil_dict, input.image_paths, input.crop_type, models_by_crop, ct, target_scalers)
+
+    soil_df = pd.DataFrame([soil_dict])
+    soil_array = ct.transform(soil_df)
+    soil_tensor = torch.tensor(soil_array, dtype=torch.float32).to(DEVICE)
+
+    img_feat = torch.tensor(extract_image_features(input.image_paths), dtype=torch.float32).unsqueeze(0).to(DEVICE)
+
+    model = models_by_crop[input.crop_type]
+    with torch.no_grad():
+        pred_scaled = model(soil_tensor, img_feat).cpu().numpy()
+
+    # Convert back to original yield scale
+    yield_kg = target_scalers[input.crop_type].inverse_transform(pred_scaled)[0][0]
     return {"predicted_yield_kg": round(yield_kg, 2)}
+
+# API to predict crop yield based on soil monitoring and image data
+@app.post("/predict")
+def predict_yield(input: SoilInput):
+    return predict_yield_method(input)
