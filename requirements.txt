@@ -1,20 +1,29 @@
+# requirements.txt (Recommended for stability and compatibility)
+
+# Package Sources (Must remain at the top)
 --find-links https://download.pytorch.org/whl/torch_stable.html
+
+# Core Web Stack
 fastapi
-uvicorn
 gunicorn
-google.generativeai
-twilio
+uvicorn[standard]
+pydantic
+
+# Utility & Auth
 python-multipart
-Pillow
-azure-cosmos
 python-jose
-azure.storage.blob
-pydantic==1.10.13
+Pillow
+requests
 dotenv
+twilio
+google.generativeai
+azure-cosmos
+azure.storage.blob
+
+# ML/Data
 torch==2.3.1+cpu
 torchvision==0.18.1+cpu
 pandas
 numpy
 scikit-learn
 shap
-requests
