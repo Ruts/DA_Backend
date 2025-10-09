@@ -14,26 +14,26 @@ from azure.storage.blob import BlobServiceClient, generate_blob_sas, BlobSasPerm
 from pydantic import BaseModel
 from typing import Optional
 from dotenv import load_dotenv
-import joblib
-import torch
-import pandas as pd
-import torch.nn as nn
-from torchvision.models import resnet18, ResNet18_Weights
-from torchvision import transforms
-from PIL import Image
-from io import BytesIO
-from urllib.parse import urlparse
-import numpy as np
-import ast
-from sklearn.compose import ColumnTransformer
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
+# import joblib
+# import torch
+# import pandas as pd
+# import torch.nn as nn
+# from torchvision.models import resnet18, ResNet18_Weights
+# from torchvision import transforms
+# from PIL import Image
+# from io import BytesIO
+# from urllib.parse import urlparse
+# import numpy as np
+# import ast
+# from sklearn.compose import ColumnTransformer
+# from sklearn.preprocessing import StandardScaler, OneHotEncoder
 
 app = FastAPI(title="Crop Yield Predictor")
 
 # Load preprocessing and models once
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-MODEL_DIR = "saved_models"
-IMAGE_SIZE = (128, 128)
+# DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# MODEL_DIR = "saved_models"
+# IMAGE_SIZE = (128, 128)
 
 # Class for storing data used in yields prediction
 class SoilInput(BaseModel):
@@ -657,26 +657,26 @@ async def analyze_farm_day(
         f"Moisture: {soil_data['moistureContent']}%"
     ])
 
-    soilInput = SoilInput(
-        pH=soil_data['pH'],
-        electricalConductivity=soil_data['electricalConductivity'],
-        organicMatter=soil_data['organicMatter'],
-        nitrogen=soil_data['nitrogen'],
-        phosphorus=soil_data['phosphorus'],
-        potassium=soil_data['potassium'],
-        calcium=soil_data['calcium'],
-        magnesium=soil_data['magnesium'],
-        sulfur=soil_data['sulfur'],
-        zinc=soil_data['zinc'],
-        iron=soil_data['iron'],
-        soilTexture=soil_data['soilTexture'],
-        moistureContent=soil_data['moistureContent'],
-        crop_type=farms[0]["crop"],
-        image_paths=image_urls
-    )
+    # soilInput = SoilInput(
+    #     pH=soil_data['pH'],
+    #     electricalConductivity=soil_data['electricalConductivity'],
+    #     organicMatter=soil_data['organicMatter'],
+    #     nitrogen=soil_data['nitrogen'],
+    #     phosphorus=soil_data['phosphorus'],
+    #     potassium=soil_data['potassium'],
+    #     calcium=soil_data['calcium'],
+    #     magnesium=soil_data['magnesium'],
+    #     sulfur=soil_data['sulfur'],
+    #     zinc=soil_data['zinc'],
+    #     iron=soil_data['iron'],
+    #     soilTexture=soil_data['soilTexture'],
+    #     moistureContent=soil_data['moistureContent'],
+    #     crop_type=farms[0]["crop"],
+    #     image_paths=image_urls
+    # )
 
-    predicted_yield = predict_yield_method(soilInput)
-    print(f"predicted_yield: {predicted_yield}")
+    # predicted_yield = predict_yield_method(soilInput)
+    # print(f"predicted_yield: {predicted_yield}")
 
     full_prompt = f"""
 {role_prompt}
@@ -692,9 +692,9 @@ Soil Data:
 {soil_text}
 
 {recommendation_prompt}
-
-{predict_prompt}: {predicted_yield}
     """
+
+    # {predict_prompt}: {predicted_yield}
 
     user_msg = {
         "id": str(uuid4()),
@@ -755,139 +755,139 @@ Soil Data:
 
     return {"status": "complete", "response": answer}
 
-def load_preprocessing(csv_path):
-    df = pd.read_csv(csv_path)
-    df.head()
-    df["image_paths"] = df["image_paths"].apply(ast.literal_eval)
-    soil_features = df.drop(columns=["date", "crop_type", "yield_per_acre", "image_paths"])
-    ct = ColumnTransformer([
-        ("texture", OneHotEncoder(), ["soilTexture"]),
-        ("num", StandardScaler(), soil_features.select_dtypes(include="number").columns.tolist())
-    ])
-    soil_array = ct.fit_transform(soil_features)
-    return ct, df, soil_array
+# def load_preprocessing(csv_path):
+#     df = pd.read_csv(csv_path)
+#     df.head()
+#     df["image_paths"] = df["image_paths"].apply(ast.literal_eval)
+#     soil_features = df.drop(columns=["date", "crop_type", "yield_per_acre", "image_paths"])
+#     ct = ColumnTransformer([
+#         ("texture", OneHotEncoder(), ["soilTexture"]),
+#         ("num", StandardScaler(), soil_features.select_dtypes(include="number").columns.tolist())
+#     ])
+#     soil_array = ct.fit_transform(soil_features)
+#     return ct, df, soil_array
 
-# --- LOAD MODELS ---
-def load_models(df, soil_array):
-    models_by_crop = {}
+# # --- LOAD MODELS ---
+# def load_models(df, soil_array):
+#     models_by_crop = {}
     
-    if hasattr(soil_array, "shape"):
-        soil_dim = soil_array.shape[1]
-    else:
-        raise TypeError(f"Expected array-like input, got {type(soil_array)}: {soil_array}")
+#     if hasattr(soil_array, "shape"):
+#         soil_dim = soil_array.shape[1]
+#     else:
+#         raise TypeError(f"Expected array-like input, got {type(soil_array)}: {soil_array}")
 
-    for crop in df["crop_type"].unique():
-        model = YieldPredictor(soil_dim).to(DEVICE)
-        model.load_state_dict(torch.load(f"{MODEL_DIR}/{crop}_model.pt"))
-        model.eval()
-        models_by_crop[crop] = model
-    return models_by_crop
+#     for crop in df["crop_type"].unique():
+#         model = YieldPredictor(soil_dim).to(DEVICE)
+#         model.load_state_dict(torch.load(f"{MODEL_DIR}/{crop}_model.pt"))
+#         model.eval()
+#         models_by_crop[crop] = model
+#     return models_by_crop
 
-# --- MODEL ---
-class YieldPredictor(nn.Module):
-    def __init__(self, soil_dim, img_dim=512):
-        super().__init__()
-        self.soil_net = nn.Sequential(
-            nn.Linear(soil_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, 32)
-        )
-        self.fusion = nn.Sequential(
-            nn.Linear(img_dim + 32, 32),
-            nn.ReLU(),
-            nn.Linear(32, 1)
-        )
+# # --- MODEL ---
+# class YieldPredictor(nn.Module):
+#     def __init__(self, soil_dim, img_dim=512):
+#         super().__init__()
+#         self.soil_net = nn.Sequential(
+#             nn.Linear(soil_dim, 64),
+#             nn.ReLU(),
+#             nn.Linear(64, 32)
+#         )
+#         self.fusion = nn.Sequential(
+#             nn.Linear(img_dim + 32, 32),
+#             nn.ReLU(),
+#             nn.Linear(32, 1)
+#         )
 
-    def forward(self, soil, img):
-        soil_feat = self.soil_net(soil)
-        combined = torch.cat((soil_feat, img), dim=1)
-        return self.fusion(combined)
+#     def forward(self, soil, img):
+#         soil_feat = self.soil_net(soil)
+#         combined = torch.cat((soil_feat, img), dim=1)
+#         return self.fusion(combined)
     
-def extract_image_features(image_paths):
-    # Load ResNet model once (should be done outside the function for production)
-    # NOTE: Moved model loading inside for now, but best practice is to load globally.
-    weights = ResNet18_Weights.DEFAULT
-    model_resnet = resnet18(weights=weights)
-    model_resnet.fc = nn.Identity()
-    model_resnet.eval().to(DEVICE)
+# def extract_image_features(image_paths):
+#     # Load ResNet model once (should be done outside the function for production)
+#     # NOTE: Moved model loading inside for now, but best practice is to load globally.
+#     weights = ResNet18_Weights.DEFAULT
+#     model_resnet = resnet18(weights=weights)
+#     model_resnet.fc = nn.Identity()
+#     model_resnet.eval().to(DEVICE)
 
-    transform = transforms.Compose([
-        # Pillow handles the PIL Image conversion naturally
-        transforms.Resize(IMAGE_SIZE), 
-        transforms.ToTensor(),
-        # Normalize with ResNet weights for proper feature extraction
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) 
-    ])
+#     transform = transforms.Compose([
+#         # Pillow handles the PIL Image conversion naturally
+#         transforms.Resize(IMAGE_SIZE), 
+#         transforms.ToTensor(),
+#         # Normalize with ResNet weights for proper feature extraction
+#         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) 
+#     ])
 
-    features = []
+#     features = []
     
-    for path in image_paths:
-        is_url = urlparse(path).scheme in ("http", "https")
-        img = None
+#     for path in image_paths:
+#         is_url = urlparse(path).scheme in ("http", "https")
+#         img = None
         
-        if is_url:
-            try:
-                # Use requests to get the content
-                response = requests.get(path, timeout=10)
-                response.raise_for_status()
+#         if is_url:
+#             try:
+#                 # Use requests to get the content
+#                 response = requests.get(path, timeout=10)
+#                 response.raise_for_status()
                 
-                # Use Pillow to open the image from bytes
-                img = Image.open(BytesIO(response.content)).convert("RGB")
+#                 # Use Pillow to open the image from bytes
+#                 img = Image.open(BytesIO(response.content)).convert("RGB")
                 
-            except Exception as e:
-                print(f"Failed to load image from URL {path} (Pillow decode failed): {e}")
-                continue
-        else:
-            # Local file path - which should not happen in the Azure worker, but included for completeness
-            try:
-                img = Image.open(path).convert("RGB")
-            except Exception as e:
-                print(f"Image file not found locally: {path}: {e}")
-                continue
+#             except Exception as e:
+#                 print(f"Failed to load image from URL {path} (Pillow decode failed): {e}")
+#                 continue
+#         else:
+#             # Local file path - which should not happen in the Azure worker, but included for completeness
+#             try:
+#                 img = Image.open(path).convert("RGB")
+#             except Exception as e:
+#                 print(f"Image file not found locally: {path}: {e}")
+#                 continue
 
-        if img is None:
-            print(f"Image not loaded for path: {path}")
-            continue
+#         if img is None:
+#             print(f"Image not loaded for path: {path}")
+#             continue
 
-        # Convert PIL Image to Tensor and extract features
-        img_tensor = transform(img).unsqueeze(0).to(DEVICE)
+#         # Convert PIL Image to Tensor and extract features
+#         img_tensor = transform(img).unsqueeze(0).to(DEVICE)
         
-        with torch.no_grad():
-            # Use the renamed model variable
-            feat = model_resnet(img_tensor).cpu().numpy()
-        features.append(feat[0])
+#         with torch.no_grad():
+#             # Use the renamed model variable
+#             feat = model_resnet(img_tensor).cpu().numpy()
+#         features.append(feat[0])
 
-    if not features:
-        raise ValueError("No valid image features extracted.")
-    return np.mean(features, axis=0)
+#     if not features:
+#         raise ValueError("No valid image features extracted.")
+#     return np.mean(features, axis=0)
 
-def predict_yield_method(input: SoilInput) -> str:
-    print(f"input; ", input)
-    ct, crops, soil_dim = load_preprocessing("data/soil_data.csv")
-    models_by_crop = load_models(crops, soil_dim)
-    model = models_by_crop.get(input.crop_type)
-    if not model:
-        return {"error": f"No model found for crop type: {input.crop_type}"}
-    soil_dict = input.dict(exclude={"crop_type", "image_paths"})
-    target_scalers = {}
-    scaler = joblib.load(f"{MODEL_DIR}/{input.crop_type}_scaler.pkl")
-    target_scalers[input.crop_type] = scaler
+# def predict_yield_method(input: SoilInput) -> str:
+#     print(f"input; ", input)
+#     ct, crops, soil_dim = load_preprocessing("data/soil_data.csv")
+#     models_by_crop = load_models(crops, soil_dim)
+#     model = models_by_crop.get(input.crop_type)
+#     if not model:
+#         return {"error": f"No model found for crop type: {input.crop_type}"}
+#     soil_dict = input.dict(exclude={"crop_type", "image_paths"})
+#     target_scalers = {}
+#     scaler = joblib.load(f"{MODEL_DIR}/{input.crop_type}_scaler.pkl")
+#     target_scalers[input.crop_type] = scaler
 
-    soil_df = pd.DataFrame([soil_dict])
-    soil_array = ct.transform(soil_df)
-    soil_tensor = torch.tensor(soil_array, dtype=torch.float32).to(DEVICE)
+#     soil_df = pd.DataFrame([soil_dict])
+#     soil_array = ct.transform(soil_df)
+#     soil_tensor = torch.tensor(soil_array, dtype=torch.float32).to(DEVICE)
 
-    img_feat = torch.tensor(extract_image_features(input.image_paths), dtype=torch.float32).unsqueeze(0).to(DEVICE)
+#     img_feat = torch.tensor(extract_image_features(input.image_paths), dtype=torch.float32).unsqueeze(0).to(DEVICE)
 
-    model = models_by_crop[input.crop_type]
-    with torch.no_grad():
-        pred_scaled = model(soil_tensor, img_feat).cpu().numpy()
+#     model = models_by_crop[input.crop_type]
+#     with torch.no_grad():
+#         pred_scaled = model(soil_tensor, img_feat).cpu().numpy()
 
-    # Convert back to original yield scale
-    yield_kg = target_scalers[input.crop_type].inverse_transform(pred_scaled)[0][0]
-    return {"predicted_yield_kg": round(yield_kg, 2)}
+#     # Convert back to original yield scale
+#     yield_kg = target_scalers[input.crop_type].inverse_transform(pred_scaled)[0][0]
+#     return {"predicted_yield_kg": round(yield_kg, 2)}
 
-# API to predict crop yield based on soil monitoring and image data
-@app.post("/predict")
-def predict_yield(input: SoilInput):
-    return predict_yield_method(input)
+# # API to predict crop yield based on soil monitoring and image data
+# @app.post("/predict")
+# def predict_yield(input: SoilInput):
+#     return predict_yield_method(input)
