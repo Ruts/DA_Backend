@@ -7,7 +7,7 @@
 fastapi
 gunicorn
 uvicorn[standard]
-pydantic
+pydantic>=2
 
 # Utility & Auth
 python-multipart
@@ -15,10 +15,10 @@ python-jose
 Pillow
 requests
 dotenv
-twilio
 google.generativeai
 azure-cosmos
 azure.storage.blob
+tzdata
 
 # ML/Data
 # torch==2.3.1+cpu
