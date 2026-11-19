@@ -18,13 +18,14 @@ Commands: `HELP`, `LOGIN`, `FARMS`, `FARM 1`, `ADD FARM`, `WEATHER`,
 `WEATHER WEEKLY MON 07:00`, and `STOP`.
 
 The portal's **Profile & Weather** page edits the same profile and farm records.
-Staff can look up a farmer by phone only when their own verified phone is explicitly
-listed in server-side `STAFF_PHONES`; the portal cannot grant staff access.
+Staff can look up a farmer by phone using a managed staff/admin account, or when their
+own verified phone is explicitly listed in server-side `STAFF_PHONES`.
 Profile names displayed in an existing JWT/sidebar refresh on the next login.
 
 ### Staff conversation inbox
 
-The portal's **Staff Inbox** is visible only to phones in server-side `STAFF_PHONES`.
+The portal's **Staff Inbox** is restricted to managed staff/admin accounts and phones
+in server-side `STAFF_PHONES`.
 It shows all captured WhatsApp inbound/outbound interactions (including onboarding,
 photo captions and weather), with phone filtering, pagination and authenticated photo
 viewing. Login codes are redacted; `accepted` means accepted by Meta, not delivered.
@@ -64,7 +65,48 @@ Changes use optimistic concurrency: refresh if another staff member changes cont
 Create **`whatsapp_interactions`**, partition **`/owner`**, default indexing, no TTL.
 Unlike the short-lived job queue, this is the staff interaction archive. Apply the
 project's retention/deletion policy to it before the pilot. Do not grant Cosmos access
-to ordinary users. The staff endpoints enforce the allowlist on every request.
+to ordinary users. Staff permissions are enforced server-side on every request.
+
+### Administration portal
+
+The login screen has separate **Farmer login** and **Admin / staff login** tabs.
+Email/password accounts do not depend on WhatsApp activation. Administrators can
+create, list, edit and delete/archive staff and farmer accounts. Staff can view the
+activity dashboard and use the conversation inbox, but cannot administer accounts.
+Farmer login and WhatsApp registration remain unchanged.
+
+Configure `ADMIN_BOOTSTRAP_EMAIL` and `ADMIN_BOOTSTRAP_PASSWORD_HASH` on the API host.
+Generate the latter with `admin_service.password_hash()` from a privately supplied
+password; never put the password or hash in source control or frontend settings.
+The first successful sign-in requires a different password of at least 12 characters
+before farmer information is accessible. Newly created and reset staff passwords
+have the same requirement. The bootstrap settings only create a missing initial
+account: changing them never resets an existing administrator's password. Remove
+the bootstrap settings after the initial account exists.
+
+Passwords use salted PBKDF2-SHA256 with 600,000 iterations. Login attempts are limited
+per email and client IP using ETag-protected records shared by all API workers.
+Password changes, resets, disabling and archiving revoke previous staff sessions.
+Every managed session rechecks the account's status and role. The initial
+administrator cannot be archived or demoted. Use Change password for your own
+account; administrators can reset another staff account's temporary password.
+
+Managed accounts and login counters share the existing `users` container, without
+a `phoneNumber` property (Cosmos's undefined partition-key value); they are never
+treated as farmer records. Farmer records retain their existing partition keys.
+The dashboard reports account/farm totals, incoming/outgoing activity, weather
+subscriptions, seven calendar days of incoming messages (UTC), and recent activity
+metadata. It does not expose message bodies or login codes in activity previews.
+
+**Delete is recoverable archiving**, not permanent data erasure. It revokes access
+and retains farms, conversations and audit history. Farmer archiving also cancels
+AI/weather automation and invalidates login codes and existing portal sessions.
+Edit an archived account and enable Active to restore it. A restored farmer remains
+in staff takeover until staff explicitly resume AI & weather. Admin-created farmer
+records do not imply consent: the farmer must still message WhatsApp and complete
+the consent/registration flow. Phone numbers and staff email identities are immutable;
+create the correct account instead of transferring an existing identity's history.
+Use a separate, reviewed retention/erasure procedure when permanent deletion is needed.
 
 For WhatsApp phone-app viewing, Meta supports **Business App coexistence** through its
 [Embedded Signup flow](https://developers.facebook.com/documentation/business-messaging/whatsapp/embedded-signup/onboarding-business-app-users).

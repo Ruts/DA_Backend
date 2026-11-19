@@ -18,6 +18,7 @@ from io import BytesIO
 from urllib.parse import urlparse
 from farmer_service import FarmerService, create_router
 from meta_whatsapp import MetaWhatsApp, phone_id, required
+from admin_service import AdminService, create_admin_router
 
 MODEL_DIR = "saved_models"
 IMAGE_SIZE = (128, 128)
@@ -166,7 +167,9 @@ async def verify_code(request: Request):
     if not user:
         raise HTTPException(401, "Invalid code.")
     farmer_service.verify_code(user, str(data.get("code", "")))
-    token = create_token({"phone": user["phoneNumber"], "name": user["name"]})
+    token = create_token({
+        "phone": user["phoneNumber"], "name": user["name"], "farmerRevision": user.get("authRevision", ""),
+    })
     return {"status": "verified", "token": token}
 
 async def get_current_user(request: Request):
@@ -176,8 +179,19 @@ async def get_current_user(request: Request):
 
     token = auth_header.split(" ")[1]
     payload = verify_token(token)
+    if payload.get("accountId"):
+        actor = admin_service.validate_actor(payload)
+        if actor.get("passwordChangeRequired") and request.url.path not in {"/admin/session", "/admin/password"}:
+            raise HTTPException(403, "Change your temporary password first.")
+        return actor
     if not isinstance(payload.get("phone"), str):
         raise HTTPException(401, "Invalid token subject.")
+    farmer = farmer_service.find_user(payload["phone"])
+    if (
+        not farmer or farmer.get("active") is False
+        or farmer.get("authRevision", "") != payload.get("farmerRevision", "")
+    ):
+        raise HTTPException(401, "Farmer account is unavailable.")
     return payload
 
 
@@ -217,6 +231,8 @@ farmer_service = FarmerService(
     interactions_container,
 )
 app.include_router(create_router(farmer_service, get_current_user))
+admin_service = AdminService(farmer_service, create_token)
+app.include_router(create_admin_router(admin_service, get_current_user))
 
 
 @app.exception_handler(CosmosAccessConditionFailedError)

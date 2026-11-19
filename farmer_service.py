@@ -55,7 +55,11 @@ class StaffMessage(BaseModel):
 
 
 def automation_paused(user):
-    return bool((user or {}).get("handoff", {}).get("paused"))
+    return (user or {}).get("active") is False or bool((user or {}).get("handoff", {}).get("paused"))
+
+
+def staff_identity(actor):
+    return actor["phone"] if actor.get("accountId") else phone_id(actor["phone"])
 
 
 def automation_revision(user):
@@ -243,7 +247,7 @@ class FarmerService:
         }
 
     def staff_message(self, user, values, actor):
-        phone, staff_phone = phone_id(user["phoneNumber"]), phone_id(actor["phone"])
+        phone, staff_phone = phone_id(user["phoneNumber"]), staff_identity(actor)
         record_id = hashlib.sha256(f"staff:{staff_phone}:{phone}:{values.requestId}".encode()).hexdigest()
 
         def remember_reply(record):
@@ -334,19 +338,23 @@ class FarmerService:
         return records[0] if records else None
 
     def staff(self, actor):
+        if actor.get("accountId"):
+            return actor.get("role") in {"admin", "staff"} and not actor.get("passwordChangeRequired")
         allowed = {phone_id(p) for p in os.getenv("STAFF_PHONES", "").split(",") if p.strip()}
         return phone_id(actor["phone"]) in allowed
 
-    def authorised_user(self, actor, phone):
+    def authorised_user(self, actor, phone, include_inactive=False):
         try:
             target = phone_id(phone)
         except ValueError as error:
             raise HTTPException(422, str(error))
-        if phone_id(actor["phone"]) != target and not self.staff(actor):
+        if not self.staff(actor) and phone_id(actor["phone"]) != target:
             raise HTTPException(403, "You cannot access another farmer's records.")
         user = self.find_user(phone)
         if not user:
             raise HTTPException(404, "Farmer not found.")
+        if user.get("active") is False and not include_inactive:
+            raise HTTPException(403, "This farmer account is archived.")
         return user
 
     def save_user(self, user):
@@ -383,12 +391,14 @@ class FarmerService:
                 raise ValueError("Add the farm's location pin before enabling forecasts.")
         values["revision"] = str(uuid4())
         values["consentAt"] = iso(utcnow()) if settings.enabled else None
-        values["updatedBy"] = phone_id(actor)
+        values["updatedBy"] = actor
         values["nextDueAt"] = next_forecast(values, utcnow()) if settings.enabled else None
         user["weather"] = values
         return self.save_user(user)
 
     def issue_code(self, user, in_chat=False):
+        if user.get("active") is False:
+            raise HTTPException(403, "This farmer account is archived.")
         now = utcnow()
         if user.get("codeSentAt") and (now - parse_time(user["codeSentAt"])).total_seconds() < 60:
             raise HTTPException(429, "Wait one minute before requesting another code.")
@@ -431,6 +441,8 @@ class FarmerService:
 
     def verify_code(self, user, code):
         import hmac
+        if user.get("active") is False:
+            raise HTTPException(403, "This farmer account is archived.")
         if (
             not user.get("codeHash") or user.get("codeAttempts", 0) >= 5
             or utcnow() >= parse_time(user["codeExpiresAt"])
@@ -754,7 +766,7 @@ def create_router(service, current_user):
             return service.conversation(user)
         handoff = {
             "paused": values.paused, "revision": str(uuid4()),
-            "changedBy": phone_id(actor["phone"]), "changedAt": iso(utcnow()),
+            "changedBy": staff_identity(actor), "changedAt": iso(utcnow()),
         }
         user["handoff"] = handoff
         service.save_user(user)
@@ -809,7 +821,7 @@ def create_router(service, current_user):
     def update_profile(phone: str, values: ProfileUpdate, actor=Depends(current_user)):
         user = service.authorised_user(actor, phone)
         user.update(values.model_dump())
-        user["updatedBy"] = phone_id(actor["phone"])
+        user["updatedBy"] = staff_identity(actor)
         return public_profile(service.save_user(user))
 
     @router.get("/profiles/{phone}/farms")
@@ -821,7 +833,7 @@ def create_router(service, current_user):
         user = service.authorised_user(actor, phone)
         farm = service.farm(user, farm_id)
         farm.update(values.model_dump(mode="json"))
-        farm["updatedBy"] = phone_id(actor["phone"])
+        farm["updatedBy"] = staff_identity(actor)
         service.farms.replace_item(
             item=farm["id"], body=farm, etag=farm["_etag"],
             match_condition=MatchConditions.IfNotModified,

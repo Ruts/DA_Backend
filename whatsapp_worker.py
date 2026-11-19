@@ -62,6 +62,8 @@ class WhatsAppWorker:
                 "language": "en", "verified": False, "onboardingStep": "consent",
             })
         job["automationRevision"] = automation_revision(user)
+        if user.get("active") is False:
+            return None
         if user.get("lastHandledId") == message["id"]:
             return user["lastReply"]
         user["lastInboundAt"] = iso(

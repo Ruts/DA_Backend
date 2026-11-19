@@ -27,8 +27,8 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
-      - name: Test WhatsApp and staff inbox
-        run: python -m unittest -v test_farmer_service
+      - name: Test WhatsApp, staff inbox and administration
+        run: python -m unittest -v test_farmer_service test_admin_service
 
       - name: Upload artifact for deployment jobs
         uses: actions/upload-artifact@v4
@@ -37,6 +37,7 @@ jobs:
           path: |
             main.py
             farmer_service.py
+            admin_service.py
             meta_whatsapp.py
             meta_setup.py
             whatsapp_worker.py

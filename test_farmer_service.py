@@ -75,6 +75,16 @@ class Container:
     def query_items(self, query, parameters=None, **kwargs):
         values = {p["name"]: p["value"] for p in parameters or []}
         items = list(self.items.values())
+        if "c.recordType = 'staffAccount'" in query:
+            items = [i for i in items if i.get("recordType") == "staffAccount"]
+        if "IS_DEFINED(c.phoneNumber)" in query:
+            items = [i for i in items if "phoneNumber" in i]
+        if "COUNT(1)" in query:
+            return Results([len(items)], 100)
+        if "@since" in values and "c.timestamp" in query:
+            items = [i for i in items if i.get("timestamp", "") >= values["@since"]]
+            if "c.direction = 'inbound' OR c.direction = 'outbound'" in query:
+                items = [i for i in items if i.get("direction") in {"inbound", "outbound"}]
         if "@id" in values:
             items = [i for i in items if i["id"] == values["@id"]]
         if "@phone" in values:
@@ -110,7 +120,7 @@ class Container:
             items.sort(key=lambda i: i["createdAt"])
         if "ORDER BY c.timestamp" in query:
             items.sort(key=lambda i: i["timestamp"], reverse="DESC" in query)
-        if "c.direction = 'inbound'" in query:
+        if "c.direction = 'inbound'" in query and "c.direction = 'outbound'" not in query:
             items = [i for i in items if i.get("direction") == "inbound"]
         if "TOP 1 " in query:
             items = items[:1]
@@ -118,6 +128,10 @@ class Container:
             items = items[:10]
         if "TOP 50" in query:
             items = items[:50]
+        if "TOP 20" in query:
+            items = items[:20]
+        if "ORDER BY c.name" in query:
+            items.sort(key=lambda i: i.get("name", ""))
         return Results(copy.deepcopy(items), kwargs.get("max_item_count", 100))
 
 
