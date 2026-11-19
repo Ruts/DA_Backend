@@ -7,7 +7,7 @@ import re
 import secrets
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Literal
-from uuid import uuid4
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
@@ -39,6 +39,34 @@ class ProfileUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=120, pattern=r"\S")
     language: Literal["en", "sw"] = "en"
+
+
+class TakeoverUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    paused: bool
+    revision: str = Field(max_length=36)
+
+
+class StaffMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    message: str = Field(min_length=1, max_length=4096, pattern=r"\S")
+    requestId: UUID
+    revision: str = Field(max_length=36)
+
+
+def automation_paused(user):
+    return bool((user or {}).get("handoff", {}).get("paused"))
+
+
+def automation_revision(user):
+    return (user or {}).get("handoff", {}).get("revision", "")
+
+
+def automation_blocked(user, job):
+    handoff = (user or {}).get("handoff", {})
+    return automation_paused(user) or (
+        bool(handoff.get("changedAt")) and parse_time(job["createdAt"]) <= parse_time(handoff["changedAt"])
+    )
 
 
 class FarmUpdate(BaseModel):
@@ -158,7 +186,9 @@ class FarmerService:
         record = {
             "id": hashlib.sha256(f"in:{message['id']}".encode()).hexdigest(),
             "owner": phone_id(message["from"]), "direction": "inbound",
-            "type": kind, "message": content, "timestamp": iso(utcnow()),
+            "type": kind, "message": content, "timestamp": iso(
+                datetime.fromtimestamp(int(message["timestamp"]), UTC) if message.get("timestamp") else utcnow()
+            ),
             "status": "received", "metaMessageId": message["id"],
         }
         if kind == "image":
@@ -176,6 +206,9 @@ class FarmerService:
             "timestamp": iso(utcnow()), "status": "sending",
         }
         self.interactions.upsert_item(record)
+        return self.complete_send(record, send)
+
+    def complete_send(self, record, send):
         try:
             message_id = send()
         except Exception:
@@ -185,6 +218,107 @@ class FarmerService:
         record.update(status="accepted", metaMessageId=message_id)
         self.interactions.upsert_item(record)
         return message_id
+
+    def conversation(self, user):
+        phone = phone_id(user["phoneNumber"])
+        records = list(self.interactions.query_items(
+            "SELECT TOP 1 * FROM c WHERE c.owner = @phone AND c.direction = 'inbound' "
+            "ORDER BY c.timestamp DESC",
+            parameters=[{"name": "@phone", "value": phone}], enable_cross_partition_query=True,
+        ))
+        times = [parse_time(value) for value in (
+            user.get("lastInboundAt"), records[0]["timestamp"] if records else None,
+        ) if value]
+        now = utcnow()
+        last_inbound = max(times) if times else None
+        deadline = last_inbound + timedelta(hours=24) if last_inbound else None
+        window_open = bool(last_inbound and last_inbound <= now < deadline)
+        return {
+            "phone": phone, "name": user.get("name", ""), "paused": automation_paused(user),
+            "revision": automation_revision(user),
+            "changedBy": user.get("handoff", {}).get("changedBy"),
+            "changedAt": user.get("handoff", {}).get("changedAt"),
+            "replyWindowEndsAt": iso(deadline) if deadline else None,
+            "windowOpen": window_open,
+        }
+
+    def staff_message(self, user, values, actor):
+        phone, staff_phone = phone_id(user["phoneNumber"]), phone_id(actor["phone"])
+        record_id = hashlib.sha256(f"staff:{staff_phone}:{phone}:{values.requestId}".encode()).hexdigest()
+
+        def remember_reply(record):
+            if record["status"] == "accepted" and record.get("farmId"):
+                self.save_chat(
+                    user, {"id": record["farmId"]}, "assistant",
+                    "[Staff reply] " + record["message"], record_id,
+                    staff_phone=staff_phone, timestamp=record["timestamp"],
+                )
+
+        def existing_send():
+            records = list(self.interactions.query_items(
+                "SELECT * FROM c WHERE c.id = @id",
+                parameters=[{"name": "@id", "value": record_id}], enable_cross_partition_query=True,
+            ))
+            record = records[0]
+            if record["message"] != values.message or record.get("revision") != values.revision:
+                raise HTTPException(409, "This request ID was already used for a different message.")
+            remember_reply(record)
+            return {key: record[key] for key in ("id", "status")}
+
+        existing = list(self.interactions.query_items(
+            "SELECT * FROM c WHERE c.id = @id",
+            parameters=[{"name": "@id", "value": record_id}], enable_cross_partition_query=True,
+        ))
+        if existing:
+            return existing_send()
+        if not automation_paused(user) or automation_revision(user) != values.revision:
+            raise HTTPException(409, "Take over this conversation and refresh before sending.")
+        if not self.conversation(user)["windowOpen"]:
+            raise HTTPException(
+                409, "The 24-hour WhatsApp reply window is closed. Ask the farmer to message first; "
+                "proactive contact outside this window requires an approved Meta template.",
+            )
+        for setting in ("META_GRAPH_VERSION", "META_ACCESS_TOKEN", "META_PHONE_NUMBER_ID"):
+            if not os.getenv(setting):
+                raise HTTPException(503, "WhatsApp is not configured. Contact the service administrator.")
+        farm = self.active_farm(user)
+        record = {
+            "id": record_id, "owner": phone, "direction": "outbound", "type": "text",
+            "senderType": "staff", "staffPhone": staff_phone, "revision": values.revision,
+            "message": values.message, "timestamp": iso(utcnow()), "status": "sending",
+            "farmId": farm["id"] if farm else None,
+        }
+        try:
+            self.interactions.create_item(record)
+        except CosmosResourceExistsError:
+            return existing_send()
+        # A concurrent resume must not release an old staff draft.
+        latest = self.find_user(phone)
+        if not automation_paused(latest) or automation_revision(latest) != values.revision:
+            record["status"] = "cancelled"
+            self.interactions.upsert_item(record)
+            return {"id": record_id, "status": "cancelled"}
+        try:
+            self.complete_send(record, lambda: self.messenger.text(phone, values.message))
+        except (RuntimeError, requests.RequestException) as error:
+            logger.warning("Staff send outcome uncertain for interaction %s", record_id)
+            raise HTTPException(
+                502, "Send outcome is uncertain. Check the inbox and Meta before sending again.",
+            ) from error
+        remember_reply(record)
+        return {"id": record_id, "status": record["status"]}
+
+    def save_chat(self, user, farm, role, content, source_id, media_id=None, staff_phone=None, timestamp=None):
+        record = {
+            "id": hashlib.sha256(f"{source_id}:{role}".encode()).hexdigest(),
+            "user": phone_id(user["phoneNumber"]), "farmId": farm["id"],
+            "role": role, "message": content, "timestamp": timestamp or iso(utcnow()),
+        }
+        if media_id:
+            record["mediaId"] = media_id
+        if staff_phone:
+            record.update(senderType="staff", staffPhone=staff_phone)
+        self.chats.upsert_item(record)
 
     def find_user(self, phone):
         phone = phone_id(phone)
@@ -439,14 +573,10 @@ class FarmerService:
         image = self.messenger.image(message["image"]["id"]) if message["type"] == "image" else None
         answer = self.adviser(user, farm, list(reversed(history)), question, image)
         for role, content in (("user", question), ("assistant", answer)):
-            record = {
-                "id": hashlib.sha256(f"{message['id']}:{role}".encode()).hexdigest(),
-                "user": phone_id(user["phoneNumber"]), "farmId": farm["id"],
-                "role": role, "message": content, "timestamp": iso(utcnow()),
-            }
-            if image and role == "user":
-                record["mediaId"] = message["image"]["id"]
-            self.chats.upsert_item(record)
+            self.save_chat(
+                user, farm, role, content, message["id"],
+                media_id=message["image"]["id"] if image and role == "user" else None,
+            )
         return answer
 
     def weather_command(self, user, text):
@@ -600,10 +730,48 @@ def create_router(service, current_user):
                     "type": "image" if item.get("mediaId") else "text",
                     "message": item.get("message", ""), "timestamp": item.get("timestamp"),
                     "status": "stored", "mediaId": item.get("mediaId"),
+                    "senderType": item.get("senderType"), "staffPhone": item.get("staffPhone"),
                 })
             else:
                 records.append({key: value for key, value in item.items() if not key.startswith("_")})
         return {"items": records, "cursor": pages.continuation_token}
+
+    def staff_user(actor, phone):
+        if not service.staff(actor):
+            raise HTTPException(403, "Staff access required.")
+        return service.authorised_user(actor, phone)
+
+    @router.get("/staff/conversations/{phone}")
+    def conversation(phone: str, actor=Depends(current_user)):
+        return service.conversation(staff_user(actor, phone))
+
+    @router.put("/staff/conversations/{phone}")
+    def takeover(phone: str, values: TakeoverUpdate, actor=Depends(current_user)):
+        user = staff_user(actor, phone)
+        if automation_revision(user) != values.revision:
+            raise HTTPException(409, "Conversation controls changed. Refresh before trying again.")
+        if automation_paused(user) == values.paused:
+            return service.conversation(user)
+        handoff = {
+            "paused": values.paused, "revision": str(uuid4()),
+            "changedBy": phone_id(actor["phone"]), "changedAt": iso(utcnow()),
+        }
+        user["handoff"] = handoff
+        service.save_user(user)
+        service.interactions.create_item({
+            "id": handoff["revision"], "owner": phone_id(user["phoneNumber"]), "direction": "internal",
+            "type": "handoff", "senderType": "staff", "staffPhone": handoff["changedBy"],
+            "timestamp": handoff["changedAt"], "status": "recorded",
+            "message": (
+                "Staff took over. AI replies and weather notifications paused."
+                if values.paused else "Staff resumed AI replies and opted-in weather notifications."
+            ),
+        })
+        return service.conversation(user)
+
+    @router.post("/staff/conversations/{phone}/messages")
+    def staff_message(phone: str, values: StaffMessage, actor=Depends(current_user)):
+        return service.staff_message(staff_user(actor, phone), values, actor)
 
     @router.get("/staff/interactions/{interaction_id}/image")
     def interaction_image(

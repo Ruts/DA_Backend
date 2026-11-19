@@ -32,6 +32,35 @@ The **Advice / portal history** source exposes existing stored advice conversati
 New WhatsApp auditing starts at this deployment; it cannot reconstruct old messages
 that were never stored. Meta can expire media, so old photo previews may be unavailable.
 
+Select a farmer using **Open conversation** or search by their phone. **Take over:
+pause AI & weather** stops automatic replies and scheduled forecasts for that farmer
+until an authorised staff member selects **Resume AI & weather**. Other farmers are
+unaffected. Incoming texts, photos and captions continue to appear; the inbox refreshes
+every 15 seconds during takeover. `STOP` still unsubscribes from weather, without an
+automatic reply during takeover. Registration and other chat commands also pause.
+Resuming does not re-send old questions or drafts; opted-in forecasts continue on the
+next worker tick if due, without replaying missed forecasts. A send already in progress
+at the moment of takeover/resume cannot be recalled.
+
+During takeover, staff can send free-text replies from the same Digital Agronomist
+WhatsApp number. Staff identity, takeover/resume actions and send outcomes are recorded
+in the interaction archive; staff identity is internal, so sign a reply when appropriate.
+Corrections are new messages, not edits or deletions of messages already sent.
+Accepted staff replies and farmer messages received during takeover are also retained
+in the selected farm's recent advice context, so resumed AI can see the conversation.
+Free-text sending requires an incoming farmer message within the last 24 hours.
+Outside that window, ask the farmer to message first or arrange an approved Meta
+contact template. Sending proactive contact templates is not implemented in the inbox.
+Weather template approval does not grant permission to use weather templates for outreach.
+Meta sender credentials must be configured before real staff messaging works.
+
+Staff sends use a unique request ID. Retrying/checking the same request never submits
+it to Meta twice. `accepted` is not proof of delivery. If a timeout or interrupted
+request leaves `sending` or `delivery_unknown`, check Meta before composing another
+message; **Check previous send** checks the original attempt without resending it.
+Do not refresh and resubmit the same text as a new request to work around that guard.
+Changes use optimistic concurrency: refresh if another staff member changes controls.
+
 Create **`whatsapp_interactions`**, partition **`/owner`**, default indexing, no TTL.
 Unlike the short-lived job queue, this is the staff interaction archive. Apply the
 project's retention/deletion policy to it before the pilot. Do not grant Cosmos access
@@ -96,8 +125,8 @@ Run **exactly one** separate, continuously running worker with
 always-on worker host is required; a local terminal or an App Service that sleeps is
 not sufficient. Do not scale the worker beyond one replica: per-farmer conversation
 ordering currently relies on a single consumer. Monitor worker restarts and queue age.
-The existing GitHub workflow deploys only the API; provision the worker separately
-before enabling the webhook for real users.
+The existing GitHub workflow deploys both the API and the separate worker App Service;
+provision and configure both hosts before enabling the webhook for real users.
 
 An alternative worker host is a separate Linux App Service on the existing Basic plan,
 with Always On enabled, a single instance, and startup command:

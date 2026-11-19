@@ -7,7 +7,9 @@ from azure.core import MatchConditions
 from azure.cosmos.exceptions import CosmosAccessConditionFailedError, CosmosHttpResponseError
 from fastapi import HTTPException
 
-from farmer_service import iso, next_forecast, utcnow
+from farmer_service import (
+    automation_blocked, automation_paused, automation_revision, iso, next_forecast, utcnow,
+)
 from meta_whatsapp import phone_id, required
 
 logger = logging.getLogger(__name__)
@@ -25,6 +27,8 @@ class WhatsAppWorker:
             enable_cross_partition_query=True,
         )
         for user in users:
+            if automation_paused(user):
+                continue
             settings = user["weather"]
             due = settings["nextDueAt"]
             key = f"{user['id']}:{settings['revision']}:{due}"
@@ -57,16 +61,31 @@ class WhatsAppWorker:
                 "id": job["owner"], "phoneNumber": job["owner"], "name": "",
                 "language": "en", "verified": False, "onboardingStep": "consent",
             })
+        job["automationRevision"] = automation_revision(user)
         if user.get("lastHandledId") == message["id"]:
             return user["lastReply"]
         user["lastInboundAt"] = iso(
             datetime.fromtimestamp(int(message["timestamp"]), timezone.utc)
             if message.get("timestamp") else utcnow()
         )
-        try:
-            reply = service.handle(user, message)
-        except (ValueError, HTTPException) as error:
-            reply = error.detail if isinstance(error, HTTPException) else str(error)
+        if automation_blocked(user, job):
+            text = message.get("text", {}).get("body", "").strip().upper()
+            if text in {"STOP", "STOP WEATHER", "ACHA", "SIMAMISHA"}:
+                service.handle(user, message)
+            farm = service.active_farm(user)
+            if farm and message["type"] in {"text", "image"}:
+                details = message.get(message["type"], {})
+                service.save_chat(
+                    user, farm, "user", details.get("body") or details.get("caption") or "[Photo]",
+                    message["id"], media_id=details.get("id") if message["type"] == "image" else None,
+                    timestamp=user["lastInboundAt"],
+                )
+            reply = None
+        else:
+            try:
+                reply = service.handle(user, message)
+            except (ValueError, HTTPException) as error:
+                reply = error.detail if isinstance(error, HTTPException) else str(error)
         user["lastHandledId"], user["lastReply"] = message["id"], reply
         service.save_user(user)
         return reply
@@ -77,6 +96,12 @@ class WhatsAppWorker:
             if "reply" not in job:
                 job["reply"] = self.prepare_inbound(job)
                 self.save_job(job)
+            user = service.find_user(job["owner"])
+            if (
+                not job["reply"] or automation_blocked(user, job)
+                or automation_revision(user) != job.get("automationRevision", "")
+            ):
+                return None
             job["status"] = "sending"
             self.save_job(job)
             return service.send_recorded(
@@ -85,14 +110,22 @@ class WhatsAppWorker:
             )
         user = service.find_user(job["owner"])
         settings = user.get("weather", {}) if user else {}
-        if not settings.get("enabled") or settings.get("revision") != job["revision"]:
+        if (
+            automation_blocked(user, job)
+            or not settings.get("enabled") or settings.get("revision") != job["revision"]
+        ):
             return None
+        revision = automation_revision(user)
         language = user.get("language", "en")
         forecast = service.forecast(service.farm(user, settings["farmId"]), language)
         template = required("META_WEATHER_TEMPLATE_SW" if language == "sw" else "META_WEATHER_TEMPLATE_EN")
         # Re-read immediately before sending, so queued forecasts respect an opt-out or edit.
-        latest = service.find_user(job["owner"]).get("weather", {})
-        if not latest.get("enabled") or latest.get("revision") != job["revision"]:
+        latest_user = service.find_user(job["owner"])
+        latest = latest_user.get("weather", {}) if latest_user else {}
+        if (
+            automation_blocked(latest_user, job) or automation_revision(latest_user) != revision
+            or not latest.get("enabled") or latest.get("revision") != job["revision"]
+        ):
             return None
         job["status"] = "sending"
         self.save_job(job)
@@ -122,13 +155,16 @@ class WhatsAppWorker:
             if job["kind"] == "inbound":
                 if job["owner"] in blocked_owners:
                     continue
+                user = self.service.find_user(job["owner"])
+                since = (user or {}).get("handoff", {}).get("changedAt", "0001-01-01T00:00:00+00:00")
                 earlier = list(self.service.jobs.query_items(
                     "SELECT TOP 1 c.id FROM c WHERE c.owner = @owner AND c.kind = 'inbound' "
-                    "AND c.createdAt < @created AND "
+                    "AND c.createdAt < @created AND c.createdAt > @since AND "
                     "(c.status = 'pending' OR c.status = 'processing' OR c.status = 'failed')",
                     parameters=[
                         {"name": "@owner", "value": job["owner"]},
                         {"name": "@created", "value": job["createdAt"]},
+                        {"name": "@since", "value": since},
                     ], enable_cross_partition_query=True,
                 ))
                 if earlier:

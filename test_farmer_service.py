@@ -8,6 +8,9 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
+from uuid import uuid4
+
+import requests
 
 from azure.cosmos.exceptions import CosmosAccessConditionFailedError, CosmosResourceExistsError
 from fastapi import FastAPI, HTTPException
@@ -88,6 +91,7 @@ class Container:
             items = [
                 i for i in items if i["owner"] == values["@owner"] and i["kind"] == "inbound"
                 and i["createdAt"] < values["@created"]
+                and i["createdAt"] > values.get("@since", "")
                 and i["status"] in {"pending", "processing", "failed"}
             ]
         if "c.weather.enabled" in query:
@@ -106,6 +110,10 @@ class Container:
             items.sort(key=lambda i: i["createdAt"])
         if "ORDER BY c.timestamp" in query:
             items.sort(key=lambda i: i["timestamp"], reverse="DESC" in query)
+        if "c.direction = 'inbound'" in query:
+            items = [i for i in items if i.get("direction") == "inbound"]
+        if "TOP 1 " in query:
+            items = items[:1]
         if "TOP 10" in query:
             items = items[:10]
         if "TOP 50" in query:
@@ -164,6 +172,185 @@ class FarmerTests(unittest.TestCase):
             "message": message, "status": "pending", "availableAt": iso(utcnow()),
             "createdAt": iso(utcnow()),
         })
+
+    def takeover(self, paused=True):
+        self.actor["phone"] = "254700000009"
+        path = f"/staff/conversations/{self.user['phoneNumber']}"
+        state = self.client.get(path).json()
+        response = self.client.put(path, json={"paused": paused, "revision": state["revision"]})
+        self.assertEqual(response.status_code, 200, response.text)
+        return response.json()
+
+    def test_staff_takeover_controls_are_private_versioned_and_audited(self):
+        path = f"/staff/conversations/{self.user['phoneNumber']}"
+        self.assertEqual(self.client.get(path).status_code, 403)
+        self.assertEqual(self.client.put(path, json={"paused": True, "revision": ""}).status_code, 403)
+        self.assertEqual(self.client.post(path + "/messages", json={
+            "message": "Hello", "requestId": str(uuid4()), "revision": "",
+        }).status_code, 403)
+        paused = self.takeover()
+        self.assertTrue(paused["paused"])
+        self.assertEqual(paused["changedBy"], self.actor["phone"])
+        self.assertEqual(self.client.put(path, json={"paused": False, "revision": ""}).status_code, 409)
+        self.assertEqual(self.client.get(path.replace(self.user["phoneNumber"], "254700000002")).status_code, 404)
+        resumed = self.takeover(False)
+        self.assertFalse(resumed["paused"])
+        self.assertNotEqual(paused["revision"], resumed["revision"])
+        self.assertEqual(len(self.interactions.items), 2)
+        self.assertTrue(all(i["direction"] == "internal" for i in self.interactions.items.values()))
+
+    def test_takeover_archives_inbound_without_ai_or_weather_and_respects_stop(self):
+        self.service.update_weather(self.user, WeatherSettings(
+            enabled=True, consent=True, farmId="farm1",
+        ), self.user["phoneNumber"])
+        self.user["weather"]["nextDueAt"] = iso(utcnow() - timedelta(minutes=1))
+        self.service.save_user(self.user)
+        worker = WhatsAppWorker(self.service)
+        worker.schedule()
+        self.takeover()
+        photo = self.job(self.message(kind="image", image={"id": "photo-id", "caption": "Yellow leaves"}))
+        stop = self.job(self.message("STOP", number=2))
+        worker.tick()
+        self.adviser.assert_not_called()
+        self.sender.image.assert_not_called()
+        self.sender.text.assert_not_called()
+        self.sender.template.assert_not_called()
+        self.assertEqual(self.jobs.items[photo["id"]]["status"], "cancelled")
+        self.assertEqual(self.jobs.items[stop["id"]]["status"], "cancelled")
+        self.assertFalse(self.service.find_user(self.user["phoneNumber"])["weather"]["enabled"])
+        self.assertTrue(any(i.get("mediaId") == "photo-id" for i in self.interactions.items.values()))
+        self.assertTrue(any(i.get("mediaId") == "photo-id" for i in self.chats.items.values()))
+        self.job({**self.message("Hello", number=3), "from": "254700000002"})
+        worker.tick()
+        self.sender.text.assert_called_once()
+        self.assertEqual(self.sender.text.call_args.args[0], "254700000002")
+
+    def test_resume_does_not_send_old_replies_and_restores_future_ai_and_weather(self):
+        self.takeover()
+        old = self.job(self.message("Old question"))
+        self.takeover(False)
+        worker = WhatsAppWorker(self.service)
+        worker.tick()
+        self.assertEqual(self.jobs.items[old["id"]]["status"], "cancelled")
+        self.sender.text.assert_not_called()
+        fresh = self.job(self.message("New question", number=2))
+        user = self.service.find_user(self.user["phoneNumber"])
+        self.service.update_weather(user, WeatherSettings(
+            enabled=True, consent=True, farmId="farm1",
+        ), user["phoneNumber"])
+        user["weather"]["nextDueAt"] = iso(utcnow() - timedelta(minutes=1))
+        self.service.save_user(user)
+        with patch.object(self.service, "forecast", return_value="Rain tomorrow"):
+            worker.tick()
+        self.assertEqual(self.jobs.items[fresh["id"]]["status"], "sent")
+        self.sender.text.assert_called_once()
+        self.sender.template.assert_called_once()
+
+    def test_takeover_during_ai_generation_discards_the_inflight_draft(self):
+        job = self.job(self.message("Why are leaves yellow?"))
+        self.adviser.side_effect = lambda *args: (self.takeover(), "An obsolete AI draft")[1]
+        worker = WhatsAppWorker(self.service)
+        with self.assertLogs("whatsapp_worker", level="ERROR"):
+            worker.tick()
+        self.sender.text.assert_not_called()
+        self.jobs.items[job["id"]]["availableAt"] = iso(utcnow())
+        worker.tick()
+        self.assertEqual(self.jobs.items[job["id"]]["status"], "cancelled")
+        self.assertTrue(self.service.find_user(self.user["phoneNumber"])["handoff"]["paused"])
+
+    def test_staff_takeover_supersedes_failed_automation_without_blocking_future_messages(self):
+        failed = self.job(self.message("Old failed question"))
+        failed["status"] = "failed"
+        self.jobs.upsert_item(failed)
+        self.takeover()
+        paused = self.job(self.message("Speak to a person", number=2))
+        worker = WhatsAppWorker(self.service)
+        worker.tick()
+        self.assertEqual(self.jobs.items[paused["id"]]["status"], "cancelled")
+        self.takeover(False)
+        fresh = self.job(self.message("HELP", number=3))
+        worker.tick()
+        self.assertEqual(self.jobs.items[fresh["id"]]["status"], "sent")
+
+    def test_cached_ai_reply_and_inflight_forecast_are_suppressed_after_takeover(self):
+        job = self.job(self.message("HELP"))
+        worker = WhatsAppWorker(self.service)
+        job["reply"] = worker.prepare_inbound(job)
+        worker.save_job(job)
+        self.takeover()
+        worker.tick()
+        self.sender.text.assert_not_called()
+        self.takeover(False)
+        user = self.service.find_user(self.user["phoneNumber"])
+        self.service.update_weather(user, WeatherSettings(
+            enabled=True, consent=True, farmId="farm1",
+        ), user["phoneNumber"])
+        user["weather"]["nextDueAt"] = iso(utcnow() - timedelta(minutes=1))
+        self.service.save_user(user)
+        with patch.object(self.service, "forecast", side_effect=lambda *args: (self.takeover(), "Rain")[1]):
+            worker.tick()
+        self.sender.template.assert_not_called()
+
+    def test_staff_replies_require_takeover_window_and_are_idempotent(self):
+        self.service.record_inbound(self.message("Please help"))
+        state = self.takeover()
+        path = f"/staff/conversations/{self.user['phoneNumber']}/messages"
+        body = {"message": "Please do not apply that treatment.", "requestId": str(uuid4()),
+                "revision": state["revision"]}
+        for _ in range(2):
+            response = self.client.post(path, json=body)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()["status"], "accepted")
+        self.sender.text.assert_called_once_with(self.user["phoneNumber"], body["message"])
+        record = self.interactions.items[response.json()["id"]]
+        self.assertEqual(record["senderType"], "staff")
+        self.assertEqual(record["staffPhone"], self.actor["phone"])
+        self.assertEqual(len(self.chats.items), 1)
+        self.assertIn(body["message"], next(iter(self.chats.items.values()))["message"])
+        self.assertEqual(self.client.post(path, json={**body, "message": "Changed"}).status_code, 409)
+        self.assertEqual(self.client.post(path, json={**body, "requestId": str(uuid4()),
+                                                    "message": "  "}).status_code, 422)
+        self.takeover(False)
+        self.assertEqual(self.client.post(path, json={**body, "requestId": str(uuid4())}).status_code, 409)
+        self.service.handle(self.service.find_user(self.user["phoneNumber"]), self.message("Follow-up"))
+        history = self.adviser.call_args.args[2]
+        self.assertEqual(history[0]["senderType"], "staff")
+
+    def test_staff_send_uncertainty_is_not_retried_and_closed_window_is_rejected(self):
+        self.service.record_inbound(self.message("Hello"))
+        state = self.takeover()
+        path = f"/staff/conversations/{self.user['phoneNumber']}/messages"
+        body = {"message": "Let us check your crop.", "requestId": str(uuid4()), "revision": state["revision"]}
+        self.sender.text.side_effect = requests.Timeout("Uncertain outcome")
+        with self.assertLogs("farmer_service", level="WARNING"):
+            self.assertEqual(self.client.post(path, json=body).status_code, 502)
+        repeated = self.client.post(path, json=body)
+        self.assertEqual(repeated.json()["status"], "delivery_unknown")
+        self.sender.text.assert_called_once()
+        for record in self.interactions.items.values():
+            if record["direction"] == "inbound":
+                record["timestamp"] = iso(utcnow() - timedelta(hours=25))
+        self.assertEqual(self.client.post(path, json={**body, "requestId": str(uuid4())}).status_code, 409)
+
+    def test_staff_send_is_cancelled_if_another_staff_member_resumes_before_send(self):
+        self.service.record_inbound(self.message("Hello"))
+        state = self.takeover()
+        create = self.interactions.create_item
+
+        def resume_when_claimed(record):
+            result = create(record)
+            user = self.service.find_user(self.user["phoneNumber"])
+            user["handoff"] = {"paused": False, "revision": str(uuid4()), "changedAt": iso(utcnow())}
+            self.service.save_user(user)
+            return result
+
+        with patch.object(self.interactions, "create_item", side_effect=resume_when_claimed):
+            response = self.client.post(f"/staff/conversations/{self.user['phoneNumber']}/messages", json={
+                "message": "Hello", "requestId": str(uuid4()), "revision": state["revision"],
+            })
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["status"], "cancelled")
+        self.sender.text.assert_not_called()
 
     def test_staff_inbox_paginates_filters_and_denies_farmers(self):
         self.service.record_inbound(self.message("Hello"))
