@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 
 from farmer_service import iso, utcnow
 from main import farmer_service
-from whatsapp_worker import WhatsAppWorker
+from whatsapp_worker import POLL_INTERVAL_SECONDS, WhatsAppWorker
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +26,9 @@ async def lifespan(app):
                 app.state.last_tick = iso(utcnow())
                 app.state.healthy = True
             except CosmosHttpResponseError:
-                logger.exception("Cosmos worker tick failed; retrying in one minute.")
+                logger.exception("Cosmos worker tick failed; retrying in %s seconds.", POLL_INTERVAL_SECONDS)
                 app.state.healthy = False
-            await asyncio.sleep(60)
+            await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
     task = asyncio.create_task(consume())
     app.state.worker_task = task

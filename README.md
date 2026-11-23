@@ -177,7 +177,7 @@ Use `/health` to verify its last successful polling tick. Never run this startup
 on the API app or enable a second standalone worker simultaneously.
 
 The webhook validates Meta's HMAC signature and phone-number ID, stores each message
-durably, and acknowledges it without waiting for AI. The worker polls every minute.
+durably, and acknowledges it without waiting for AI. The worker waits five seconds between polling ticks.
 Forecasts are off by default; enabling requires explicit consent and farm coordinates.
 Frequency, local time, IANA timezone and weekly weekday are editable in the portal.
 Every-two-day schedules advance by calendar days, not worker uptime. Missed forecasts

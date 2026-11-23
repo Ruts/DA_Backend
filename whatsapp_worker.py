@@ -14,6 +14,8 @@ from meta_whatsapp import phone_id, required
 
 logger = logging.getLogger(__name__)
 
+POLL_INTERVAL_SECONDS = 5
+
 
 class WhatsAppWorker:
     def __init__(self, service):
@@ -211,8 +213,8 @@ def main():
         try:
             worker.tick()
         except CosmosHttpResponseError:
-            logger.exception("Cosmos worker tick failed; retrying in one minute.")
-        time.sleep(60)
+            logger.exception("Cosmos worker tick failed; retrying in %s seconds.", POLL_INTERVAL_SECONDS)
+        time.sleep(POLL_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":
