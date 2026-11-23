@@ -61,6 +61,7 @@ class StaffCreate(Values):
     name: str = Field(min_length=1, max_length=120)
     role: Literal["admin", "staff"] = "staff"
     password: Password
+    stationId: str | None = None
 
 
 class StaffUpdate(Values):
@@ -69,6 +70,7 @@ class StaffUpdate(Values):
     active: bool
     revision: str = Field(min_length=1, max_length=200)
     password: Password | None = None
+    stationId: str | None = None
 
 
 class FarmerCreate(Values):
@@ -82,12 +84,13 @@ class FarmerUpdate(Values):
     language: Literal["en", "sw"]
     active: bool
     revision: str = Field(min_length=1, max_length=200)
+    stationOverride: str | None = None
 
 
 def public_account(account):
     return {
         **{key: account.get(key) for key in (
-            "id", "email", "name", "role", "createdAt", "lastLoginAt", "deletedAt",
+            "id", "email", "name", "role", "createdAt", "lastLoginAt", "deletedAt", "stationId",
         )},
         "active": account.get("active", True),
         "passwordChangeRequired": account.get("passwordChangeRequired", False),
@@ -101,6 +104,7 @@ def public_farmer(user):
         **public_profile(user), "id": user["id"], "revision": user["_etag"],
         "active": user.get("active", True), "deletedAt": user.get("deletedAt"),
         "lastInboundAt": user.get("lastInboundAt"), "verified": bool(user.get("verified")),
+        "stationOverride": user.get("stationOverride"), "primaryFarmId": user.get("primaryFarmId"),
     }
 
 
@@ -185,6 +189,7 @@ class AdminService:
         return {
             **payload, "phone": account["email"], "name": account["name"],
             "role": account["role"], "passwordChangeRequired": account["passwordChangeRequired"],
+            "stationId": account.get("stationId"),
         }
 
     def require_account(self, actor, admin=False, allow_password_change=False):
@@ -194,6 +199,8 @@ class AdminService:
             raise HTTPException(403, "Change your temporary password first.")
         if admin and actor["role"] != "admin":
             raise HTTPException(403, "Administrator access required.")
+        if not allow_password_change and actor["role"] == "staff" and self.farmers.access:
+            self.farmers.access.require_station(actor.get("stationId"))
         return self.find(actor["accountId"])
 
     def audit(self, actor, action, target):
@@ -203,9 +210,9 @@ class AdminService:
             "timestamp": iso(utcnow()), "status": "recorded", "message": action,
         })
 
-    def page(self, query, cursor, limit, serializer):
+    def page(self, query, cursor, limit, serializer, parameters=None):
         pages = self.users.query_items(
-            query, enable_cross_partition_query=True, max_item_count=limit,
+            query, parameters=parameters, enable_cross_partition_query=True, max_item_count=limit,
         ).by_page(continuation_token=cursor)
         return {
             "items": [serializer(item) for item in next(pages, [])],
@@ -222,23 +229,29 @@ class AdminService:
         if record["_etag"] != revision:
             raise HTTPException(409, "Record changed. Refresh before editing.")
 
-    def dashboard(self):
+    def dashboard(self, actor):
+        clause, scope = self.farmers.access.scope(actor, "phoneNumber")
         farmers = list(self.users.query_items(
-            "SELECT * FROM c WHERE IS_DEFINED(c.phoneNumber)", enable_cross_partition_query=True,
+            "SELECT * FROM c WHERE IS_DEFINED(c.phoneNumber)" + (" AND " + clause if clause else ""),
+            parameters=scope, enable_cross_partition_query=True,
         ))
         active = [u for u in farmers if u.get("active", True)]
         since = iso((utcnow() - timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0))
-        parameters = [{"name": "@since", "value": since}]
+        owner_clause, owner_scope = self.farmers.access.scope(actor, "owner")
+        parameters = [{"name": "@since", "value": since}] + owner_scope
         activity = list(self.farmers.interactions.query_items(
             "SELECT c.owner, c.direction, c.timestamp, c.type FROM c WHERE c.timestamp >= @since "
-            "AND (c.direction = 'inbound' OR c.direction = 'outbound')",
+            "AND (c.direction = 'inbound' OR c.direction = 'outbound')" +
+            (" AND " + owner_clause if owner_clause else ""),
             parameters=parameters, enable_cross_partition_query=True,
         ))
         recent = list(self.farmers.interactions.query_items(
-            "SELECT TOP 20 * FROM c ORDER BY c.timestamp DESC", enable_cross_partition_query=True,
+            "SELECT TOP 20 * FROM c" + (" WHERE " + owner_clause if owner_clause else "") +
+            " ORDER BY c.timestamp DESC", parameters=owner_scope, enable_cross_partition_query=True,
         ))
         farms = list(self.farmers.farms.query_items(
-            "SELECT VALUE COUNT(1) FROM c", enable_cross_partition_query=True,
+            "SELECT VALUE COUNT(1) FROM c" + (" WHERE " + owner_clause if owner_clause else ""),
+            parameters=owner_scope, enable_cross_partition_query=True,
         ))[0]
         inbound = [item for item in activity if item["direction"] == "inbound"]
         counts = Counter(item["timestamp"][:10] for item in inbound)
@@ -307,7 +320,7 @@ def create_admin_router(service, current_user):
 
     @router.get("/dashboard")
     def dashboard(actor=Depends(staff)):
-        return service.dashboard()
+        return service.dashboard(actor)
 
     @router.get("/staff")
     def staff_list(
@@ -321,6 +334,10 @@ def create_admin_router(service, current_user):
 
     @router.post("/staff", status_code=201)
     def create_staff(values: StaffCreate, actor=Depends(admin)):
+        if values.stationId:
+            service.farmers.access.require_station(values.stationId)
+        if values.role == "admin" and values.stationId:
+            raise HTTPException(422, "Global administrators cannot be restricted to a station.")
         email = values.email.lower()
         if service.find(account_id(email)):
             raise HTTPException(409, "This email already exists. Edit or restore that staff account.")
@@ -329,6 +346,7 @@ def create_admin_router(service, current_user):
             "name": values.name, "role": values.role, "active": True,
             "passwordHash": password_hash(values.password), "passwordChangeRequired": True,
             "sessionVersion": str(uuid4()), "createdAt": iso(utcnow()),
+            "stationId": values.stationId,
         }
         try:
             saved = service.users.create_item(account)
@@ -347,7 +365,12 @@ def create_admin_router(service, current_user):
             raise HTTPException(409, "You cannot disable or demote yourself or the initial administrator.")
         if account["id"] == actor["accountId"] and values.password:
             raise HTTPException(409, "Use Change password for your own account.")
-        account.update(name=values.name, role=values.role, active=values.active)
+        station_id = values.stationId if "stationId" in values.model_fields_set else account.get("stationId")
+        if values.role == "admin":
+            station_id = None
+        if station_id:
+            service.farmers.access.require_station(station_id)
+        account.update(name=values.name, role=values.role, active=values.active, stationId=station_id)
         if values.active:
             account.pop("deletedAt", None)
         if values.password:
@@ -372,12 +395,15 @@ def create_admin_router(service, current_user):
     @router.get("/farmers")
     def farmer_list(
         cursor: str | None = Query(default=None, max_length=16384),
-        limit: int = Query(default=50, ge=1, le=100), actor=Depends(admin),
+        limit: int = Query(default=50, ge=1, le=100), actor=Depends(staff),
     ):
-        return service.page(
-            "SELECT * FROM c WHERE IS_DEFINED(c.phoneNumber) ORDER BY c.name ASC",
-            cursor, limit, public_farmer,
+        clause, parameters = service.farmers.access.scope(actor, "phoneNumber")
+        page = service.page(
+            "SELECT * FROM c WHERE IS_DEFINED(c.phoneNumber)" + (" AND " + clause if clause else "") +
+            " ORDER BY c.name ASC", cursor, limit, public_farmer, parameters,
         )
+        service.farmers.access.annotate_farmers(page["items"])
+        return page
 
     @router.post("/farmers", status_code=201)
     def create_farmer(values: FarmerCreate, actor=Depends(admin)):
@@ -399,9 +425,15 @@ def create_admin_router(service, current_user):
         return public_farmer(saved)
 
     @router.patch("/farmers/{phone}")
-    def update_farmer(phone: str, values: FarmerUpdate, actor=Depends(admin)):
+    def update_farmer(phone: str, values: FarmerUpdate, actor=Depends(staff)):
         user = service.farmers.authorised_user(actor, phone, include_inactive=True)
         service.check_revision(user, values.revision)
+        if "stationOverride" in values.model_fields_set:
+            if actor["role"] != "admin":
+                raise HTTPException(403, "Only global administrators can override station assignments.")
+            if values.stationOverride:
+                service.farmers.access.require_station(values.stationOverride)
+            user["stationOverride"] = values.stationOverride
         if not values.active:
             service.archive_farmer(user, actor)
         user.update(name=values.name, language=values.language, active=values.active)
@@ -412,7 +444,7 @@ def create_admin_router(service, current_user):
         return public_farmer(user)
 
     @router.delete("/farmers/{phone}")
-    def delete_farmer(phone: str, revision: str, actor=Depends(admin)):
+    def delete_farmer(phone: str, revision: str, actor=Depends(staff)):
         user = service.farmers.authorised_user(actor, phone, include_inactive=True)
         service.check_revision(user, revision)
         service.archive_farmer(user, actor)

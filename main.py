@@ -16,9 +16,10 @@ from dotenv import load_dotenv
 from PIL import Image
 from io import BytesIO
 from urllib.parse import urlparse
-from farmer_service import FarmerService, create_router
+from farmer_service import FarmCreate, FarmerService, create_router
 from meta_whatsapp import MetaWhatsApp, phone_id, required
 from admin_service import AdminService, create_admin_router
+from station_service import StationService, create_station_router
 
 MODEL_DIR = "saved_models"
 IMAGE_SIZE = (128, 128)
@@ -183,6 +184,8 @@ async def get_current_user(request: Request):
         actor = admin_service.validate_actor(payload)
         if actor.get("passwordChangeRequired") and request.url.path not in {"/admin/session", "/admin/password"}:
             raise HTTPException(403, "Change your temporary password first.")
+        if not request.url.path.startswith(("/admin/", "/staff/", "/profiles/")):
+            raise HTTPException(403, "Use the staff portal to manage authorised farmer records.")
         return actor
     if not isinstance(payload.get("phone"), str):
         raise HTTPException(401, "Invalid token subject.")
@@ -230,9 +233,22 @@ farmer_service = FarmerService(
     users_container, farms_container, chats_container, jobs_container, messenger, advise_farmer,
     interactions_container,
 )
+station_service = StationService(farmer_service)
+farmer_service.access = station_service
 app.include_router(create_router(farmer_service, get_current_user))
 admin_service = AdminService(farmer_service, create_token)
 app.include_router(create_admin_router(admin_service, get_current_user))
+app.include_router(create_station_router(station_service, admin_service, get_current_user))
+
+
+def reports_user(user=Depends(get_current_user)):
+    station_service.require_feature(user, "reports")
+    return user
+
+
+def drone_user(user=Depends(get_current_user)):
+    station_service.require_feature(user, "drones")
+    return user
 
 
 @app.exception_handler(CosmosAccessConditionFailedError)
@@ -247,15 +263,9 @@ async def dashboard_data(user=Depends(get_current_user)):
 
 # API to add the farm data
 @app.post("/farms")
-async def create_farm(request: Request, user=Depends(get_current_user)):
-    data = await request.json()
+async def create_farm(data: FarmCreate, user=Depends(get_current_user)):
     farm = {
-        "id": str(uuid4()),
-        "owner": user["phone"],
-        "name": data["name"],
-        "crop": data["crop"],
-        "acreage": data["acreage"],
-        "coordinates": data["coordinates"]
+        **data.model_dump(mode="json"), "id": str(uuid4()), "owner": user["phone"],
     }
     farms_container.upsert_item(farm)
     return {"status": "created", "farm": farm}
@@ -267,8 +277,9 @@ async def get_user_farms(user=Depends(get_current_user)):
 
 # API to add a harvest
 @app.post("/harvests")
-async def add_harvest(request: Request, user=Depends(get_current_user)):
+async def add_harvest(request: Request, user=Depends(reports_user)):
     data = await request.json()
+    station_service.require_feature(user, "reports", data["farmId"])
     harvest = {
         "id": str(uuid4()),
         "farmId": data["farmId"],
@@ -282,14 +293,17 @@ async def add_harvest(request: Request, user=Depends(get_current_user)):
 
 # API to fetch harvest data
 @app.get("/harvests")
-async def get_user_harvests(user=Depends(get_current_user)):
+async def get_user_harvests(user=Depends(reports_user)):
     query = f"SELECT * FROM c WHERE c.owner = '{user['phone']}'"
-    return list(harvests_container.query_items(query, enable_cross_partition_query=True))
+    allowed = station_service.allowed_farms(user, "reports")
+    return [item for item in harvests_container.query_items(query, enable_cross_partition_query=True)
+            if item["farmId"] in allowed]
 
 # API to add environmental conditions
 @app.post("/environments")
-async def add_environmental_data(request: Request, user=Depends(get_current_user)):
+async def add_environmental_data(request: Request, user=Depends(reports_user)):
     data = await request.json()
+    station_service.require_feature(user, "reports", data["farmId"])
     record = {
         "id": str(uuid4()),
         "farmId": data["farmId"],
@@ -304,9 +318,11 @@ async def add_environmental_data(request: Request, user=Depends(get_current_user
 
 # API to fetch the environment data
 @app.get("/environments")
-async def get_environmental_data(user=Depends(get_current_user)):
+async def get_environmental_data(user=Depends(reports_user)):
     query = f"SELECT * FROM c WHERE c.owner = '{user['phone']}'"
-    return list(environments_container.query_items(query, enable_cross_partition_query=True))
+    allowed = station_service.allowed_farms(user, "reports")
+    return [item for item in environments_container.query_items(query, enable_cross_partition_query=True)
+            if item["farmId"] in allowed]
 
 # API to add farm grid images
 @app.post("/grid-images")
@@ -314,9 +330,9 @@ async def upload_multiple_grid_images(
     farmId: str = Form(...),
     dateUploaded: date = Form(...),
     files: List[UploadFile] = File(...),
-    user=Depends(get_current_user)
+    user=Depends(drone_user)
 ):
-    farmer_service.farm(farmer_service.authorised_user(user, user["phone"]), farmId)
+    station_service.require_feature(user, "drones", farmId)
     image_urls = []
 
     for file in files:
@@ -340,9 +356,11 @@ async def upload_multiple_grid_images(
 
 # API to fetch farm grid images
 @app.get("/grid-images")
-async def get_grid_images(user=Depends(get_current_user)):
+async def get_grid_images(user=Depends(drone_user)):
+    allowed_farms = station_service.allowed_farms(user, "drones")
     query = f"SELECT * FROM c WHERE c.owner = '{user['phone']}'"
     items = list(grid_container.query_items(query, enable_cross_partition_query=True))
+    items = [item for item in items if item["farmId"] in allowed_farms]
 
     for item in items:
         if isinstance(item["imageUrl"], list):
@@ -383,8 +401,8 @@ def generate_sas_url_user_image(blob_name: str) -> str:
 
 # API to add soil monitoring data
 @app.post("/soil-samples")
-async def store_soil_sample(sample: SoilSample, user=Depends(get_current_user)):
-    farmer_service.farm(farmer_service.authorised_user(user, user["phone"]), sample.farmId)
+async def store_soil_sample(sample: SoilSample, user=Depends(drone_user)):
+    station_service.require_feature(user, "drones", sample.farmId)
     print(f"sample: {sample}")
     sample_doc = sample.dict()
     sample_doc["owner"] = user["phone"]
@@ -402,8 +420,10 @@ async def get_soil_samples(
     farmId: Optional[str] = Query(None),
     startDate: Optional[date] = Query(None),
     endDate: Optional[date] = Query(None),
-    user=Depends(get_current_user)
+    user=Depends(drone_user)
 ):
+    if farmId:
+        station_service.require_feature(user, "drones", farmId)
     base_query = f"SELECT * FROM c WHERE c.owner = '{user['phone']}'"
     
     if farmId:
@@ -414,7 +434,8 @@ async def get_soil_samples(
         base_query += f" AND c.date <= '{endDate}'"
 
     items = list(soil_container.query_items(base_query, enable_cross_partition_query=True))
-    return items
+    allowed = station_service.allowed_farms(user, "drones")
+    return [item for item in items if item["farmId"] in allowed]
 
 # Method to serialize dates
 def serialize_dates(obj):
@@ -470,20 +491,27 @@ async def chat_endpoint(request: Request, user=Depends(get_current_user)):
 # API to fetch chat history
 @app.get("/chat-history")
 async def get_chat_history(user=Depends(get_current_user)):
+    station_service.require_feature(user, "chat")
     phone = phone_id(user["phone"])
-    return list(chats_container.query_items(
+    items = list(chats_container.query_items(
         "SELECT * FROM c WHERE c.user = @phone OR c.user = @plus ORDER BY c.timestamp ASC",
         parameters=[{"name": "@phone", "value": phone}, {"name": "@plus", "value": "+" + phone}],
         enable_cross_partition_query=True,
     ))
+    rule = next(r for r in station_service.rules()["items"] if r["id"] == "chat")
+    if rule["scope"] == "all":
+        return items
+    allowed = station_service.allowed_farms(user, "chat")
+    return [item for item in items if item.get("farmId") in allowed]
 
 # API to analyse farm data
 @app.post("/analyze-farm-day")
 async def analyze_farm_day(
     farmId: str = Form(...),
     date: date = Form(...),
-    user=Depends(get_current_user)
+    user=Depends(drone_user)
 ):
+    station_service.require_feature(user, "drones", farmId)
     print(f"farmId: {farmId}")
     print(f"date: {date}")
 

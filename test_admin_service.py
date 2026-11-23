@@ -109,8 +109,8 @@ class AdminTests(unittest.TestCase):
         })
         staff = self.headers(changed)
         self.assertEqual(self.client.get("/admin/session", headers=old_headers).status_code, 401)
-        self.assertEqual(self.client.get("/admin/dashboard", headers=staff).status_code, 200)
-        self.assertEqual(self.client.get("/staff/interactions", headers=staff).status_code, 200)
+        self.assertEqual(self.client.get("/admin/dashboard", headers=staff).status_code, 403)
+        self.assertEqual(self.client.get("/staff/interactions", headers=staff).status_code, 403)
         for path in ("/admin/staff", "/admin/farmers"):
             self.assertEqual(self.client.get(path, headers=staff).status_code, 403)
             self.assertEqual(self.client.get(path).status_code, 401)

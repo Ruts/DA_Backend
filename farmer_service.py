@@ -90,6 +90,18 @@ class FarmUpdate(BaseModel):
         return self
 
 
+class FarmCreate(FarmUpdate):
+    id: str | None = Field(default=None, exclude=True, max_length=200)
+    coordinates: list[dict[str, float]] = Field(default_factory=list, max_length=1000)
+
+    @model_validator(mode="after")
+    def valid_polygon(self):
+        if any(set(p) != {"lat", "lng"} or not -90 <= p["lat"] <= 90 or not -180 <= p["lng"] <= 180
+               for p in self.coordinates):
+            raise ValueError("Provide valid latitude/longitude coordinates.")
+        return self
+
+
 class WeatherSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
@@ -126,7 +138,7 @@ def next_forecast(settings, after):
 
 
 def public_profile(user, staff=False):
-    fields = ("phoneNumber", "name", "language", "consentAt", "onboardingStep", "weather")
+    fields = ("phoneNumber", "name", "language", "consentAt", "onboardingStep", "weather", "primaryFarmId")
     return {
         **{key: user.get(key) for key in fields},
         "language": user.get("language") or "en", "isStaff": staff,
@@ -180,6 +192,7 @@ class FarmerService:
         self.users, self.farms, self.chats, self.jobs = users, farms, chats, jobs
         self.messenger, self.adviser = messenger, adviser
         self.interactions = interactions
+        self.access = None
 
     def record_inbound(self, message):
         kind = message["type"]
@@ -353,6 +366,10 @@ class FarmerService:
         user = self.find_user(phone)
         if not user:
             raise HTTPException(404, "Farmer not found.")
+        if self.access and self.staff(actor) and (
+            actor.get("accountId") or phone_id(actor["phone"]) != target
+        ):
+            self.access.authorise(actor, user)
         if user.get("active") is False and not include_inactive:
             raise HTTPException(403, "This farmer account is archived.")
         return user
@@ -387,6 +404,8 @@ class FarmerService:
         values = settings.model_dump()
         if settings.enabled:
             farm = self.farm(user, settings.farmId)
+            if self.access and not self.access.available("weather", farm):
+                raise HTTPException(403, "Weather notifications are not available for this farm.")
             if farm.get("latitude") is None or farm.get("longitude") is None:
                 raise ValueError("Add the farm's location pin before enabling forecasts.")
         values["revision"] = str(uuid4())
@@ -719,14 +738,23 @@ def create_router(service, current_user):
             raise HTTPException(403, "Staff access required.")
         parameters = []
         query = "SELECT * FROM c"
+        clauses = []
         if phone:
             try:
                 target = phone_id(phone)
             except ValueError as error:
                 raise HTTPException(422, str(error))
             field = "owner" if source == "whatsapp" else "user"
-            query += f" WHERE c.{field} = @phone OR c.{field} = @plus"
+            service.authorised_user(actor, target, include_inactive=True)
+            clauses.append(f"(c.{field} = @phone OR c.{field} = @plus)")
             parameters = [{"name": "@phone", "value": target}, {"name": "@plus", "value": "+" + target}]
+        if service.access:
+            clause, scoped = service.access.scope(actor, "owner" if source == "whatsapp" else "user")
+            if clause:
+                clauses.append(clause)
+                parameters.extend(scoped)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY c.timestamp DESC"
         container = service.interactions if source == "whatsapp" else service.chats
         pages = container.query_items(
@@ -799,6 +827,8 @@ def create_router(service, current_user):
         ))
         if not records or not records[0].get("mediaId"):
             raise HTTPException(404, "Photo not found.")
+        service.authorised_user(actor, records[0].get("owner") if source == "whatsapp" else records[0].get("user"),
+                                include_inactive=True)
         try:
             data, mime = service.messenger.image(records[0]["mediaId"])
         except (ValueError, RuntimeError, requests.RequestException) as error:

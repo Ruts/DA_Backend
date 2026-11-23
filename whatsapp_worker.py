@@ -31,6 +31,10 @@ class WhatsAppWorker:
         for user in users:
             if automation_paused(user):
                 continue
+            if self.service.access:
+                farm = self.service.farm(user, user["weather"]["farmId"])
+                if not self.service.access.available("weather", farm):
+                    continue
             settings = user["weather"]
             due = settings["nextDueAt"]
             key = f"{user['id']}:{settings['revision']}:{due}"
@@ -121,7 +125,10 @@ class WhatsAppWorker:
             return None
         revision = automation_revision(user)
         language = user.get("language", "en")
-        forecast = service.forecast(service.farm(user, settings["farmId"]), language)
+        farm = service.farm(user, settings["farmId"])
+        if service.access and not service.access.available("weather", farm):
+            return None
+        forecast = service.forecast(farm, language)
         template = required("META_WEATHER_TEMPLATE_SW" if language == "sw" else "META_WEATHER_TEMPLATE_EN")
         # Re-read immediately before sending, so queued forecasts respect an opt-out or edit.
         latest_user = service.find_user(job["owner"])
@@ -130,6 +137,8 @@ class WhatsAppWorker:
             automation_blocked(latest_user, job) or automation_revision(latest_user) != revision
             or not latest.get("enabled") or latest.get("revision") != job["revision"]
         ):
+            return None
+        if service.access and not service.access.available("weather", service.farm(latest_user, latest["farmId"])):
             return None
         job["status"] = "sending"
         self.save_job(job)

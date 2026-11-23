@@ -79,6 +79,11 @@ class Container:
             items = [i for i in items if i.get("recordType") == "staffAccount"]
         if "IS_DEFINED(c.phoneNumber)" in query:
             items = [i for i in items if "phoneNumber" in i]
+        if "@recordType" in values:
+            items = [i for i in items if i.get("recordType") == values["@recordType"]]
+        if "@owners" in values:
+            field = query.split("ARRAY_CONTAINS(@owners, c.")[1].split(")")[0]
+            items = [i for i in items if i.get(field) in values["@owners"]]
         if "COUNT(1)" in query:
             return Results([len(items)], 100)
         if "@since" in values and "c.timestamp" in query:

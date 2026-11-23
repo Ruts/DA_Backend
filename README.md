@@ -202,8 +202,39 @@ ID and caption, not an independently archived image. Establish a retention/delet
 policy for farmer and chat records before a real pilot.
 
 Tests: `python -m pip install -r requirements-dev.txt`, then
-`python -m unittest -v test_farmer_service`. These tests use fake storage and mocked
+`python -m unittest -v test_farmer_service test_admin_service test_station_service`. These tests use fake storage and mocked
 providers; they do not register a number or send real messages.
+
+### Stations and farmer-visible services
+
+Global administrators use **Stations** to add physical sites with latitude,
+longitude, coverage radius (kilometres) and public contact details. Station and
+service configuration records use the existing users container; no new container
+or partition-key migration is required. Edits use Cosmos ETags.
+
+Assign each non-administrator staff account to one active station in **Staff**.
+Existing or newly created unassigned staff have no farmer-data access until assigned.
+Their own session and password endpoints remain available. Station changes revoke
+staff sessions; station archiving immediately removes coverage and blocks access.
+The legacy `STAFF_PHONES` allowlist does not bypass station isolation in the API.
+Global administrators retain access to all stations and farmers.
+
+Farmers choose their **primary farm** in **My farms**. Until explicitly selected,
+the first farm by ID is used consistently for existing accounts. The nearest active
+station covering that farm becomes the support station (distance, then station ID,
+breaks overlap ties). Global administrators may override support ownership through
+**Farmers**. Station staff can manage only their assigned farmers' records and
+messages, including direct conversation and photo requests.
+
+**Farmer services** controls weather, chat history, reports and drone-service
+availability. Farms and profiles always remain available. Weather, chat history and
+reports start enabled; drones start disabled. Optional modules can be restricted to
+selected station coverage. Physical eligibility always uses each farm's actual
+coordinates (or its existing polygon's centre), never a support-station override.
+Unlocated farms do not qualify for location-based services. Drone availability
+publishes eligible stations' contact details, not booking or flight-control features.
+Disabled modules are hidden in the portal and denied by their API endpoints;
+disabled weather also cancels already queued forecasts before sending.
 
 The legacy yield model loads only when `ENABLE_EXPERIMENTAL_YIELD=true`; leave it
 disabled until its missing data, optional ML dependencies and field validation are
