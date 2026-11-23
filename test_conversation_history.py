@@ -180,15 +180,28 @@ class HistoryFarmTests(unittest.TestCase):
             "id": "legacy", "user": "0700000001", "role": "assistant", "message": "Legacy advice",
             "timestamp": "2025-10-12T18:39:48",
         })
+        self.containers["chats"].create_item({
+            "id": "structured", "user": {"phone": "+254700000001", "name": "Private metadata", "exp": 1},
+            "role": "assistant", "message": "Structured owner advice", "timestamp": "2025-11-12T18:39:48",
+        })
+        self.containers["chats"].create_item({
+            "id": "unowned", "user": {}, "role": "assistant", "message": "Unowned history",
+            "timestamp": "2025-11-12T18:39:48",
+        })
         self.containers["whatsapp_interactions"].create_item({
             "id": "admin-audit", "owner": "station-config", "direction": "internal", "timestamp": iso(utcnow()),
         })
-        result = backfill_portal_history(self.containers["chats"], self.containers["whatsapp_interactions"])
-        self.assertEqual(result, {"imported": 1, "alreadyImported": 0, "whatsappAdviceCopiesSkipped": 2})
-        self.assertEqual(backfill_portal_history(self.containers["chats"], self.containers["whatsapp_interactions"])["alreadyImported"], 1)
+        with self.assertLogs("conversation_history", level="WARNING"):
+            result = backfill_portal_history(self.containers["chats"], self.containers["whatsapp_interactions"])
+        self.assertEqual(result, {"imported": 2, "alreadyImported": 0, "whatsappAdviceCopiesSkipped": 2, "invalidOwnersSkipped": 1})
+        with self.assertLogs("conversation_history", level="WARNING"):
+            again = backfill_portal_history(self.containers["chats"], self.containers["whatsapp_interactions"])
+        self.assertEqual(again["alreadyImported"], 2)
         messages = self.client.get("/chat-history/page", headers=headers).json()["items"]
-        self.assertEqual([m["message"] for m in messages], ["Legacy advice", "Hello"])
+        self.assertEqual([m["message"] for m in messages], ["Legacy advice", "Structured owner advice", "Hello"])
         self.assertTrue(messages[0]["timestamp"].endswith("+00:00"))
+        self.assertNotIn("Private metadata", str(messages))
+        self.assertEqual(len(self.containers["chats"].items), 5)
 
     def test_future_portal_messages_are_saved_to_both_histories(self):
         user, headers = self.account()

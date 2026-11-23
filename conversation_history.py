@@ -12,13 +12,18 @@ from meta_whatsapp import phone_id, required
 logger = logging.getLogger(__name__)
 
 
+def chat_owner(chat):
+    owner = chat["user"]
+    return phone_id(owner["phone"] if isinstance(owner, dict) else owner)
+
+
 def record_portal_chat(interactions, chat):
     timestamp = datetime.fromisoformat(chat["timestamp"].replace("Z", "+00:00"))
     if timestamp.tzinfo is None:
         timestamp = timestamp.replace(tzinfo=timezone.utc)
     record = {
         "id": "portal-" + hashlib.sha256(chat["id"].encode()).hexdigest(),
-        "owner": phone_id(chat["user"]), "direction": "inbound" if chat["role"] == "user" else "outbound",
+        "owner": chat_owner(chat), "direction": "inbound" if chat["role"] == "user" else "outbound",
         "message": chat["message"], "timestamp": timestamp.astimezone(timezone.utc).isoformat(),
         "channel": "portal", "legacyChatId": chat["id"], "type": "text", "status": "stored",
     }
@@ -45,9 +50,15 @@ def backfill_portal_history(chats, interactions):
                 whatsapp_copies.add((owner, hashlib.sha256(f"{record['metaMessageId']}:{role}".encode()).hexdigest()))
         if record.get("senderType") == "staff":
             whatsapp_copies.add((owner, hashlib.sha256(f"{record['id']}:assistant".encode()).hexdigest()))
-    counts = {"imported": 0, "alreadyImported": 0, "whatsappAdviceCopiesSkipped": 0}
+    counts = {"imported": 0, "alreadyImported": 0, "whatsappAdviceCopiesSkipped": 0, "invalidOwnersSkipped": 0}
     for chat in chats.query_items("SELECT * FROM c", enable_cross_partition_query=True):
-        if chat.get("channel") == "whatsapp" or (phone_id(chat["user"]), chat["id"]) in whatsapp_copies:
+        try:
+            owner = chat_owner(chat)
+        except (KeyError, ValueError):
+            logger.warning("Legacy history has no valid phone owner; original record retained.")
+            counts["invalidOwnersSkipped"] += 1
+            continue
+        if chat.get("channel") == "whatsapp" or (owner, chat["id"]) in whatsapp_copies:
             counts["whatsappAdviceCopiesSkipped"] += 1
             continue
         counts["imported" if record_portal_chat(interactions, chat) else "alreadyImported"] += 1
