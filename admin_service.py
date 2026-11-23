@@ -242,6 +242,7 @@ class AdminService:
         activity = list(self.farmers.interactions.query_items(
             "SELECT c.owner, c.direction, c.timestamp, c.type FROM c WHERE c.timestamp >= @since "
             "AND (c.direction = 'inbound' OR c.direction = 'outbound')" +
+            " AND (NOT IS_DEFINED(c.channel) OR c.channel != 'portal')" +
             (" AND " + owner_clause if owner_clause else ""),
             parameters=parameters, enable_cross_partition_query=True,
         ))
@@ -250,7 +251,8 @@ class AdminService:
             " ORDER BY c.timestamp DESC", parameters=owner_scope, enable_cross_partition_query=True,
         ))
         farms = list(self.farmers.farms.query_items(
-            "SELECT VALUE COUNT(1) FROM c" + (" WHERE " + owner_clause if owner_clause else ""),
+            "SELECT VALUE COUNT(1) FROM c WHERE (NOT IS_DEFINED(c.active) OR c.active = true)" +
+            (" AND " + owner_clause if owner_clause else ""),
             parameters=owner_scope, enable_cross_partition_query=True,
         ))[0]
         inbound = [item for item in activity if item["direction"] == "inbound"]

@@ -11,9 +11,19 @@ def phone_id(value):
     if not isinstance(value, str):
         raise ValueError("Use an international phone number including country code.")
     value = re.sub(r"[\s()+-]", "", value)
+    if re.fullmatch(r"0[17][0-9]{8}", value):
+        value = "254" + value[1:]
     if not re.fullmatch(r"[1-9][0-9]{7,14}", value):
         raise ValueError("Use an international phone number including country code.")
     return value
+
+
+def phone_aliases(value):
+    canonical = phone_id(value)
+    aliases = [canonical, "+" + canonical]
+    if re.fullmatch(r"254[17][0-9]{8}", canonical):
+        aliases.append("0" + canonical[3:])
+    return aliases
 
 
 def required(name):

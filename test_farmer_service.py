@@ -4,6 +4,7 @@ import hmac
 import importlib.util
 import json
 import os
+import re
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -38,7 +39,7 @@ class Pages:
         page = self.items[self.offset:self.offset + self.limit]
         self.offset += len(page)
         self.continuation_token = str(self.offset) if self.offset < len(self.items) else None
-        return page
+        return iter(page)
 
 
 class Results(list):
@@ -84,12 +85,25 @@ class Container:
         if "@owners" in values:
             field = query.split("ARRAY_CONTAINS(@owners, c.")[1].split(")")[0]
             items = [i for i in items if i.get(field) in values["@owners"]]
+        if "@phones" in values:
+            fields = re.findall(r"ARRAY_CONTAINS\(@phones, c\.(\w+)\)", query)
+            items = [i for i in items if any(i.get(field) in values["@phones"] for field in fields)]
+        if "NOT IS_DEFINED(c.active)" in query:
+            items = [i for i in items if i.get("active") is not False]
+        if "c.channel != 'portal'" in query:
+            items = [i for i in items if i.get("channel") != "portal"]
         if "COUNT(1)" in query:
             return Results([len(items)], 100)
         if "@since" in values and "c.timestamp" in query:
             items = [i for i in items if i.get("timestamp", "") >= values["@since"]]
             if "c.direction = 'inbound' OR c.direction = 'outbound'" in query:
                 items = [i for i in items if i.get("direction") in {"inbound", "outbound"}]
+        if "@through" in values:
+            items = [i for i in items if i.get("timestamp", "") <= values["@through"]
+                     and i.get("direction") in {"inbound", "outbound"}
+                     and i.get("status") in {"received", "accepted", "stored", "delivery_unknown"}]
+        if "@farms" in values:
+            items = [i for i in items if i.get("farmId") in values["@farms"]]
         if "@id" in values:
             items = [i for i in items if i["id"] == values["@id"]]
         if "@phone" in values:

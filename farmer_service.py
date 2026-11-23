@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from meta_whatsapp import phone_id, required, valid_signature
+from meta_whatsapp import phone_aliases, phone_id, required, valid_signature
 
 UTC = timezone.utc
 logger = logging.getLogger(__name__)
@@ -102,6 +102,12 @@ class FarmCreate(FarmUpdate):
         return self
 
 
+class FarmStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    active: bool
+    revision: str = Field(min_length=1, max_length=200)
+
+
 class WeatherSettings(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
@@ -146,7 +152,8 @@ def public_profile(user, staff=False):
 
 
 def public_farm(farm):
-    return {key: value for key, value in farm.items() if not key.startswith("_")}
+    return {**{key: value for key, value in farm.items() if not key.startswith("_")},
+            "active": farm.get("active", True), "revision": farm.get("_etag")}
 
 
 PROMPTS = {
@@ -239,9 +246,10 @@ class FarmerService:
     def conversation(self, user):
         phone = phone_id(user["phoneNumber"])
         records = list(self.interactions.query_items(
-            "SELECT TOP 1 * FROM c WHERE c.owner = @phone AND c.direction = 'inbound' "
+            "SELECT TOP 1 * FROM c WHERE ARRAY_CONTAINS(@phones, c.owner) AND c.direction = 'inbound' "
+            "AND (NOT IS_DEFINED(c.channel) OR c.channel != 'portal') "
             "ORDER BY c.timestamp DESC",
-            parameters=[{"name": "@phone", "value": phone}], enable_cross_partition_query=True,
+            parameters=[{"name": "@phones", "value": phone_aliases(phone)}], enable_cross_partition_query=True,
         ))
         times = [parse_time(value) for value in (
             user.get("lastInboundAt"), records[0]["timestamp"] if records else None,
@@ -330,6 +338,7 @@ class FarmerService:
             "id": hashlib.sha256(f"{source_id}:{role}".encode()).hexdigest(),
             "user": phone_id(user["phoneNumber"]), "farmId": farm["id"],
             "role": role, "message": content, "timestamp": timestamp or iso(utcnow()),
+            "channel": "whatsapp",
         }
         if media_id:
             record["mediaId"] = media_id
@@ -337,13 +346,17 @@ class FarmerService:
             record.update(senderType="staff", staffPhone=staff_phone)
         self.chats.upsert_item(record)
 
+    def save_portal_chat(self, record):
+        from conversation_history import record_portal_chat
+
+        self.chats.upsert_item(record)
+        record_portal_chat(self.interactions, record)
+
     def find_user(self, phone):
-        phone = phone_id(phone)
-        # Older registrations used both +254... and 254... as Cosmos IDs.
+        aliases = phone_aliases(phone)
         records = list(self.users.query_items(
-            "SELECT * FROM c WHERE c.phoneNumber = @phone OR c.phoneNumber = @plus "
-            "OR c.id = @phone OR c.id = @plus",
-            parameters=[{"name": "@phone", "value": phone}, {"name": "@plus", "value": "+" + phone}],
+            "SELECT * FROM c WHERE ARRAY_CONTAINS(@phones, c.phoneNumber) OR ARRAY_CONTAINS(@phones, c.id)",
+            parameters=[{"name": "@phones", "value": aliases}],
             enable_cross_partition_query=True,
         ))
         if len(records) > 1:
@@ -382,23 +395,24 @@ class FarmerService:
         user.update(saved)
         return user
 
-    def farm_list(self, user):
-        phone = phone_id(user["phoneNumber"])
-        return list(self.farms.query_items(
-            "SELECT * FROM c WHERE c.owner = @phone OR c.owner = @plus ORDER BY c.id ASC",
-            parameters=[{"name": "@phone", "value": phone}, {"name": "@plus", "value": "+" + phone}],
+    def farm_list(self, user, include_archived=False):
+        records = list(self.farms.query_items(
+            "SELECT * FROM c WHERE ARRAY_CONTAINS(@phones, c.owner) ORDER BY c.id ASC",
+            parameters=[{"name": "@phones", "value": phone_aliases(user["phoneNumber"])}],
             enable_cross_partition_query=True,
         ))
+        return [farm for farm in records if include_archived or farm.get("active") is not False]
 
-    def farm(self, user, farm_id):
-        farm = next((f for f in self.farm_list(user) if f["id"] == farm_id), None)
+    def farm(self, user, farm_id, include_archived=False):
+        farm = next((f for f in self.farm_list(user, include_archived) if f["id"] == farm_id), None)
         if not farm:
             raise HTTPException(404, "Farm not found.")
         return farm
 
     def active_farm(self, user):
         farms = self.farm_list(user)
-        return next((f for f in farms if f["id"] == user.get("activeFarmId")), farms[0] if farms else None)
+        primary = next((f for f in farms if f["id"] == user.get("primaryFarmId")), farms[0] if farms else None)
+        return next((f for f in farms if f["id"] == user.get("activeFarmId")), primary)
 
     def update_weather(self, user, settings, actor):
         values = settings.model_dump()
@@ -595,9 +609,9 @@ class FarmerService:
         question = text if message["type"] == "text" else message["image"].get("caption", "")
         question = question or "What can you observe in this crop photo? What further information is needed?"
         history = list(self.chats.query_items(
-            "SELECT TOP 10 * FROM c WHERE c.user = @phone AND c.farmId = @farm ORDER BY c.timestamp DESC",
+            "SELECT TOP 10 * FROM c WHERE ARRAY_CONTAINS(@phones, c.user) AND c.farmId = @farm ORDER BY c.timestamp DESC",
             parameters=[
-                {"name": "@phone", "value": phone_id(user["phoneNumber"])},
+                {"name": "@phones", "value": phone_aliases(user["phoneNumber"])},
                 {"name": "@farm", "value": farm["id"]},
             ], enable_cross_partition_query=True,
         ))
@@ -746,8 +760,10 @@ def create_router(service, current_user):
                 raise HTTPException(422, str(error))
             field = "owner" if source == "whatsapp" else "user"
             service.authorised_user(actor, target, include_inactive=True)
-            clauses.append(f"(c.{field} = @phone OR c.{field} = @plus)")
-            parameters = [{"name": "@phone", "value": target}, {"name": "@plus", "value": "+" + target}]
+            clauses.append(f"ARRAY_CONTAINS(@phones, c.{field})")
+            parameters = [{"name": "@phones", "value": phone_aliases(target)}]
+        if source == "whatsapp":
+            clauses.append("(NOT IS_DEFINED(c.channel) OR c.channel != 'portal')")
         if service.access:
             clause, scoped = service.access.scope(actor, "owner" if source == "whatsapp" else "user")
             if clause:
@@ -855,8 +871,33 @@ def create_router(service, current_user):
         return public_profile(service.save_user(user))
 
     @router.get("/profiles/{phone}/farms")
-    def farms(phone: str, actor=Depends(current_user)):
-        return [public_farm(f) for f in service.farm_list(service.authorised_user(actor, phone))]
+    def farms(phone: str, include_archived: bool = False, actor=Depends(current_user)):
+        return [public_farm(f) for f in service.farm_list(service.authorised_user(actor, phone), include_archived)]
+
+    @router.put("/profiles/{phone}/farms/{farm_id}/status")
+    def farm_status(phone: str, farm_id: str, values: FarmStatus, actor=Depends(current_user)):
+        user = service.authorised_user(actor, phone)
+        farm = service.farm(user, farm_id, include_archived=True)
+        if values.revision != farm["_etag"]:
+            raise HTTPException(409, "Farm changed. Refresh your records before retrying.")
+        active = sorted(service.farm_list(user), key=lambda f: f["id"])
+        primary = next((f for f in active if f["id"] == user.get("primaryFarmId")), active[0] if active else None)
+        if not values.active and primary and primary["id"] == farm_id and len(active) > 1:
+            raise HTTPException(409, "Choose another primary farm before archiving this one.")
+        farm.update(active=values.active, updatedBy=staff_identity(actor))
+        if values.active:
+            farm.pop("archivedAt", None)
+        else:
+            farm["archivedAt"] = iso(utcnow())
+        saved = service.farms.replace_item(
+            item=farm["id"], body=farm, etag=farm["_etag"], match_condition=MatchConditions.IfNotModified,
+        )
+        service.interactions.create_item({
+            "id": str(uuid4()), "owner": phone_id(user["phoneNumber"]), "direction": "internal",
+            "type": "farm_status", "farmId": farm_id, "timestamp": iso(utcnow()), "status": "recorded",
+            "message": "Farm restored." if values.active else "Farm archived.", "changedBy": staff_identity(actor),
+        })
+        return public_farm(saved)
 
     @router.patch("/profiles/{phone}/farms/{farm_id}")
     def update_farm(phone: str, farm_id: str, values: FarmUpdate, actor=Depends(current_user)):

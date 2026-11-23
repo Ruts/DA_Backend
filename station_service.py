@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
 from farmer_service import iso, public_farm, utcnow
-from meta_whatsapp import phone_id
+from meta_whatsapp import phone_aliases, phone_id
 
 SERVICES = {
     "weather": ("Weather forecasts", True),
@@ -109,7 +109,7 @@ class StationService:
         if user.get("stationOverride"):
             return next((s for s in stations if s["id"] == user["stationOverride"] and s.get("active")), None)
         farms = self.farmers.farm_list(user) if farms is None else farms
-        farms = sorted(farms, key=lambda f: f["id"])
+        farms = sorted((f for f in farms if f.get("active") is not False), key=lambda f: f["id"])
         primary = next((f for f in farms if f["id"] == user.get("primaryFarmId")), farms[0] if farms else None)
         matches = self.covering(primary, stations) if primary else []
         return matches[0] if matches else None
@@ -131,12 +131,13 @@ class StationService:
 
     def farm_index(self, owners=None):
         parameters = [] if owners is None else [{
-            "name": "@owners", "value": owners + ["+" + p for p in owners],
+            "name": "@owners", "value": [alias for owner in owners for alias in phone_aliases(owner)],
         }]
         query = "SELECT * FROM c" + (" WHERE ARRAY_CONTAINS(@owners, c.owner)" if owners is not None else "")
         grouped = defaultdict(list)
         for farm in self.farmers.farms.query_items(query, parameters=parameters, enable_cross_partition_query=True):
-            grouped[phone_id(farm["owner"])].append(farm)
+            if farm.get("active") is not False:
+                grouped[phone_id(farm["owner"])].append(farm)
         return grouped
 
     def annotate_farmers(self, records):
@@ -160,7 +161,7 @@ class StationService:
         if owners is None:
             return "", []
         return f"ARRAY_CONTAINS(@owners, c.{field})", [{
-            "name": "@owners", "value": owners + ["+" + p for p in owners],
+            "name": "@owners", "value": [alias for owner in owners for alias in phone_aliases(owner)],
         }]
 
     def rules(self):
@@ -177,6 +178,8 @@ class StationService:
         }
 
     def available(self, key, farm, stations=None, rules=None):
+        if farm.get("active") is False:
+            return False
         rule = next(r for r in (rules or self.rules())["items"] if r["id"] == key)
         if not rule["enabled"]:
             return False
@@ -200,14 +203,17 @@ class StationService:
         return {f["id"] for f in self.farmers.farm_list(user) if self.available(key, f, stations, rules)}
 
     def snapshot(self, user):
-        farms = self.farmers.farm_list(user)
+        records = self.farmers.farm_list(user, include_archived=True)
+        farms = [f for f in records if f.get("active") is not False]
         stations, rules = self.stations(), self.rules()
         assigned = self.assignment(user, farms, stations)
-        primary = user.get("primaryFarmId") or (min(farms, key=lambda f: f["id"])["id"] if farms else None)
+        primary = next((f["id"] for f in farms if f["id"] == user.get("primaryFarmId")),
+                       min(farms, key=lambda f: f["id"])["id"] if farms else None)
         drones = next(r for r in rules["items"] if r["id"] == "drones")
         return {
             "primaryFarmId": primary,
             "station": self.public_station(assigned) if assigned else None,
+            "archivedFarms": [public_farm(f) for f in records if f.get("active") is False],
             "services": [r["id"] for r in rules["items"]
                          if any(self.available(r["id"], f, stations, rules) for f in farms or [{}])],
             "farms": [{

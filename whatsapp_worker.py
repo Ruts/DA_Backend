@@ -31,10 +31,9 @@ class WhatsAppWorker:
         for user in users:
             if automation_paused(user):
                 continue
-            if self.service.access:
-                farm = self.service.farm(user, user["weather"]["farmId"])
-                if not self.service.access.available("weather", farm):
-                    continue
+            farm = self.service.farm(user, user["weather"]["farmId"], include_archived=True)
+            if farm.get("active") is False or self.service.access and not self.service.access.available("weather", farm):
+                continue
             settings = user["weather"]
             due = settings["nextDueAt"]
             key = f"{user['id']}:{settings['revision']}:{due}"
@@ -125,8 +124,8 @@ class WhatsAppWorker:
             return None
         revision = automation_revision(user)
         language = user.get("language", "en")
-        farm = service.farm(user, settings["farmId"])
-        if service.access and not service.access.available("weather", farm):
+        farm = service.farm(user, settings["farmId"], include_archived=True)
+        if farm.get("active") is False or service.access and not service.access.available("weather", farm):
             return None
         forecast = service.forecast(farm, language)
         template = required("META_WEATHER_TEMPLATE_SW" if language == "sw" else "META_WEATHER_TEMPLATE_EN")
@@ -138,7 +137,8 @@ class WhatsAppWorker:
             or not latest.get("enabled") or latest.get("revision") != job["revision"]
         ):
             return None
-        if service.access and not service.access.available("weather", service.farm(latest_user, latest["farmId"])):
+        latest_farm = service.farm(latest_user, latest["farmId"], include_archived=True)
+        if latest_farm.get("active") is False or service.access and not service.access.available("weather", latest_farm):
             return None
         job["status"] = "sending"
         self.save_job(job)

@@ -17,9 +17,10 @@ from PIL import Image
 from io import BytesIO
 from urllib.parse import urlparse
 from farmer_service import FarmCreate, FarmerService, create_router
-from meta_whatsapp import MetaWhatsApp, phone_id, required
+from meta_whatsapp import MetaWhatsApp, phone_aliases, phone_id, required
 from admin_service import AdminService, create_admin_router
 from station_service import StationService, create_station_router
+from conversation_history import create_history_router
 
 MODEL_DIR = "saved_models"
 IMAGE_SIZE = (128, 128)
@@ -195,7 +196,7 @@ async def get_current_user(request: Request):
         or farmer.get("authRevision", "") != payload.get("farmerRevision", "")
     ):
         raise HTTPException(401, "Farmer account is unavailable.")
-    return payload
+    return {**payload, "phone": phone_id(farmer["phoneNumber"])}
 
 
 def advise_farmer(user, farm, history, question, image):
@@ -239,6 +240,7 @@ app.include_router(create_router(farmer_service, get_current_user))
 admin_service = AdminService(farmer_service, create_token)
 app.include_router(create_admin_router(admin_service, get_current_user))
 app.include_router(create_station_router(station_service, admin_service, get_current_user))
+app.include_router(create_history_router(farmer_service, get_current_user))
 
 
 def reports_user(user=Depends(get_current_user)):
@@ -294,9 +296,11 @@ async def add_harvest(request: Request, user=Depends(reports_user)):
 # API to fetch harvest data
 @app.get("/harvests")
 async def get_user_harvests(user=Depends(reports_user)):
-    query = f"SELECT * FROM c WHERE c.owner = '{user['phone']}'"
+    query = "SELECT * FROM c WHERE ARRAY_CONTAINS(@phones, c.owner)"
     allowed = station_service.allowed_farms(user, "reports")
-    return [item for item in harvests_container.query_items(query, enable_cross_partition_query=True)
+    return [item for item in harvests_container.query_items(
+                query, parameters=[{"name": "@phones", "value": phone_aliases(user["phone"])}],
+                enable_cross_partition_query=True)
             if item["farmId"] in allowed]
 
 # API to add environmental conditions
@@ -319,9 +323,11 @@ async def add_environmental_data(request: Request, user=Depends(reports_user)):
 # API to fetch the environment data
 @app.get("/environments")
 async def get_environmental_data(user=Depends(reports_user)):
-    query = f"SELECT * FROM c WHERE c.owner = '{user['phone']}'"
+    query = "SELECT * FROM c WHERE ARRAY_CONTAINS(@phones, c.owner)"
     allowed = station_service.allowed_farms(user, "reports")
-    return [item for item in environments_container.query_items(query, enable_cross_partition_query=True)
+    return [item for item in environments_container.query_items(
+                query, parameters=[{"name": "@phones", "value": phone_aliases(user["phone"])}],
+                enable_cross_partition_query=True)
             if item["farmId"] in allowed]
 
 # API to add farm grid images
@@ -358,8 +364,10 @@ async def upload_multiple_grid_images(
 @app.get("/grid-images")
 async def get_grid_images(user=Depends(drone_user)):
     allowed_farms = station_service.allowed_farms(user, "drones")
-    query = f"SELECT * FROM c WHERE c.owner = '{user['phone']}'"
-    items = list(grid_container.query_items(query, enable_cross_partition_query=True))
+    query = "SELECT * FROM c WHERE ARRAY_CONTAINS(@phones, c.owner)"
+    items = list(grid_container.query_items(
+        query, parameters=[{"name": "@phones", "value": phone_aliases(user["phone"])}],
+        enable_cross_partition_query=True))
     items = [item for item in items if item["farmId"] in allowed_farms]
 
     for item in items:
@@ -424,7 +432,7 @@ async def get_soil_samples(
 ):
     if farmId:
         station_service.require_feature(user, "drones", farmId)
-    base_query = f"SELECT * FROM c WHERE c.owner = '{user['phone']}'"
+    base_query = "SELECT * FROM c WHERE ARRAY_CONTAINS(@phones, c.owner)"
     
     if farmId:
         base_query += f" AND c.farmId = '{farmId}'"
@@ -433,7 +441,9 @@ async def get_soil_samples(
     if endDate:
         base_query += f" AND c.date <= '{endDate}'"
 
-    items = list(soil_container.query_items(base_query, enable_cross_partition_query=True))
+    items = list(soil_container.query_items(
+        base_query, parameters=[{"name": "@phones", "value": phone_aliases(user["phone"])}],
+        enable_cross_partition_query=True))
     allowed = station_service.allowed_farms(user, "drones")
     return [item for item in items if item["farmId"] in allowed]
 
@@ -453,9 +463,10 @@ async def handle_chat_payload(data: dict):
     print(f"message: {message}")
 
     # Step 1: Fetch full history
-    phone = user["phone"]
-    query = f"SELECT * FROM c WHERE c.user = '{phone}' ORDER BY c.timestamp ASC"
-    history = list(chats_container.query_items(query, enable_cross_partition_query=True))
+    phone = phone_id(user["phone"])
+    query = "SELECT * FROM c WHERE ARRAY_CONTAINS(@phones, c.user) ORDER BY c.timestamp ASC"
+    history = list(chats_container.query_items(
+        query, parameters=[{"name": "@phones", "value": phone_aliases(phone)}], enable_cross_partition_query=True))
 
     # Step 2: Format for LLM
     formatted = [
@@ -472,12 +483,12 @@ async def handle_chat_payload(data: dict):
     # Step 3: Store incoming message
     user_msg = {
         "id": str(uuid4()),
-        "user": user["phone"],
+        "user": phone,
         "role": "user",
         "message": message,
         "timestamp": datetime.utcnow().isoformat()
     }
-    chats_container.upsert_item(user_msg)
+    farmer_service.save_portal_chat(user_msg)
 
     return {"formatted": formatted}
 
@@ -492,10 +503,9 @@ async def chat_endpoint(request: Request, user=Depends(get_current_user)):
 @app.get("/chat-history")
 async def get_chat_history(user=Depends(get_current_user)):
     station_service.require_feature(user, "chat")
-    phone = phone_id(user["phone"])
     items = list(chats_container.query_items(
-        "SELECT * FROM c WHERE c.user = @phone OR c.user = @plus ORDER BY c.timestamp ASC",
-        parameters=[{"name": "@phone", "value": phone}, {"name": "@plus", "value": "+" + phone}],
+        "SELECT * FROM c WHERE ARRAY_CONTAINS(@phones, c.user) ORDER BY c.timestamp ASC",
+        parameters=[{"name": "@phones", "value": phone_aliases(user["phone"])}],
         enable_cross_partition_query=True,
     ))
     rule = next(r for r in station_service.rules()["items"] if r["id"] == "chat")
@@ -515,18 +525,19 @@ async def analyze_farm_day(
     print(f"farmId: {farmId}")
     print(f"date: {date}")
 
-    farm_query = f"SELECT * FROM c WHERE c.owner = '{user['phone']}' AND c.id = '{farmId}'"
-    farms = list(farms_container.query_items(farm_query, enable_cross_partition_query=True))
+    farm_query = "SELECT * FROM c WHERE ARRAY_CONTAINS(@phones, c.owner) AND c.id = @id"
+    parameters = [{"name": "@phones", "value": phone_aliases(user["phone"])}, {"name": "@id", "value": farmId}]
+    farms = list(farms_container.query_items(farm_query, parameters=parameters, enable_cross_partition_query=True))
     
     img_query = f"""
-        SELECT * FROM c WHERE c.owner = '{user['phone']}' AND c.farmId = '{farmId}' AND c.date = '{date}'
+        SELECT * FROM c WHERE ARRAY_CONTAINS(@phones, c.owner) AND c.farmId = '{farmId}' AND c.date = '{date}'
     """
-    images = list(grid_container.query_items(img_query, enable_cross_partition_query=True))
+    images = list(grid_container.query_items(img_query, parameters=parameters[:1], enable_cross_partition_query=True))
 
     soil_query = f"""
-        SELECT * FROM c WHERE c.owner = '{user['phone']}' AND c.farmId = '{farmId}' AND c.date = '{date}'
+        SELECT * FROM c WHERE ARRAY_CONTAINS(@phones, c.owner) AND c.farmId = '{farmId}' AND c.date = '{date}'
     """
-    soil = list(soil_container.query_items(soil_query, enable_cross_partition_query=True))
+    soil = list(soil_container.query_items(soil_query, parameters=parameters[:1], enable_cross_partition_query=True))
 
     if not images or not soil:
         print(f"not images or not soil")
@@ -613,7 +624,7 @@ Soil Data:
         "message": full_prompt,
         "timestamp": datetime.utcnow().isoformat()
     }
-    chats_container.upsert_item(user_msg)
+    farmer_service.save_portal_chat(user_msg)
 
     # Send message to LLM
     try:
@@ -633,7 +644,7 @@ Soil Data:
         "message": answer,
         "timestamp": datetime.utcnow().isoformat()
     }
-    chats_container.upsert_item(analysis_doc)
+    farmer_service.save_portal_chat(analysis_doc)
 
     # Generate summary for WhatsApp
     responseSummary = model.generate_content(summarize_prompt + ": " + answer)
@@ -649,7 +660,7 @@ Soil Data:
         "message": "Answer Summary: " + answerSummary,
         "timestamp": datetime.utcnow().isoformat()
     }
-    chats_container.upsert_item(analysis_doc)
+    farmer_service.save_portal_chat(analysis_doc)
 
     recipient = farmer_service.authorised_user(user, user["phone"])
     from farmer_service import parse_time, utcnow
