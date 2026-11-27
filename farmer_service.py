@@ -23,6 +23,10 @@ UTC = timezone.utc
 logger = logging.getLogger(__name__)
 
 
+class AdviceUnavailableError(RuntimeError):
+    pass
+
+
 def utcnow():
     return datetime.now(UTC)
 
@@ -615,7 +619,10 @@ class FarmerService:
                 {"name": "@farm", "value": farm["id"]},
             ], enable_cross_partition_query=True,
         ))
-        image = self.messenger.image(message["image"]["id"]) if message["type"] == "image" else None
+        try:
+            image = self.messenger.image(message["image"]["id"]) if message["type"] == "image" else None
+        except (requests.RequestException, RuntimeError) as error:
+            raise AdviceUnavailableError("Crop photo retrieval failed.") from error
         answer = self.adviser(user, farm, list(reversed(history)), question, image)
         for role, content in (("user", question), ("assistant", answer)):
             self.save_chat(

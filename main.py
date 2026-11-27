@@ -3,6 +3,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, Depends, Upload
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import google.generativeai as genai
+from google.api_core.exceptions import GoogleAPIError
 import requests
 from azure.cosmos import CosmosClient
 from azure.cosmos.exceptions import CosmosAccessConditionFailedError
@@ -16,7 +17,7 @@ from dotenv import load_dotenv
 from PIL import Image
 from io import BytesIO
 from urllib.parse import urlparse
-from farmer_service import FarmCreate, FarmerService, create_router
+from farmer_service import AdviceUnavailableError, FarmCreate, FarmerService, create_router
 from meta_whatsapp import MetaWhatsApp, phone_aliases, phone_id, required
 from admin_service import AdminService, create_admin_router
 from station_service import StationService, create_station_router
@@ -75,7 +76,7 @@ SUMMARIZE = os.getenv("SUMMARIZE")
 
 # Initialize Google Gemini LLM
 genai.configure(api_key = os.getenv("GOOGLE_API_KEY"))
-model = genai.GenerativeModel(os.getenv("GEMINI_MODEL", "gemini-2.5-flash"))
+model = genai.GenerativeModel(os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"))
 messenger = MetaWhatsApp()
 
 app = FastAPI()
@@ -222,12 +223,16 @@ def advise_farmer(user, farm, history, question, image):
     if image:
         parts.append({"mime_type": image[1], "data": image[0]})
     adviser = genai.GenerativeModel(
-        os.getenv("GEMINI_MODEL", "gemini-2.5-flash"), system_instruction=instructions,
+        os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"), system_instruction=instructions,
     )
-    response = adviser.generate_content(parts, request_options={"timeout": 60})
-    if not response.text:
-        raise RuntimeError("AI returned an empty answer.")
-    return response.text[:4000]
+    try:
+        response = adviser.generate_content(parts, request_options={"timeout": 60})
+        answer = response.text
+    except (GoogleAPIError, ValueError) as error:
+        raise AdviceUnavailableError("AI advice is temporarily unavailable.") from error
+    if not answer:
+        raise AdviceUnavailableError("AI returned an empty answer.")
+    return answer[:4000]
 
 
 farmer_service = FarmerService(

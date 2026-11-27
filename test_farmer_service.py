@@ -18,7 +18,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from farmer_service import (
-    FarmerService, FarmUpdate, WeatherSettings, create_router, iso, next_forecast, utcnow,
+    AdviceUnavailableError, FarmerService, FarmUpdate, WeatherSettings, create_router,
+    iso, next_forecast, utcnow,
 )
 from meta_whatsapp import MetaWhatsApp
 from whatsapp_worker import WhatsAppWorker
@@ -602,6 +603,92 @@ class FarmerTests(unittest.TestCase):
         self.assertEqual(self.jobs.items[first["id"]]["status"], "pending")
         self.assertEqual(self.jobs.items[second["id"]]["status"], "pending")
         self.assertNotIn("attempts", self.jobs.items[second["id"]])
+
+    def test_failed_photo_notifies_once_and_releases_later_messages(self):
+        first = self.job(self.message(kind="image", image={"id": "crop-photo"}))
+        first["attempts"] = 4
+        self.jobs.upsert_item(first)
+        second = self.job(self.message("Why are leaves yellow?", number=2))
+        self.adviser.side_effect = AdviceUnavailableError("AI unavailable")
+        worker = WhatsAppWorker(self.service)
+        with self.assertLogs("whatsapp_worker", level="ERROR"):
+            worker.tick()
+        self.assertEqual(self.jobs.items[first["id"]]["status"], "pending")
+        self.assertNotIn("attempts", self.jobs.items[second["id"]])
+        self.adviser.side_effect = None
+        worker.tick()
+        worker.tick()
+        failed = self.jobs.items[first["id"]]
+        self.assertEqual(failed["status"], "failed_advice")
+        self.assertNotIn("ttl", failed)
+        self.assertEqual(self.jobs.items[second["id"]]["status"], "sent")
+        self.assertEqual(self.sender.text.call_count, 2)
+        self.assertIn("could not process", self.sender.text.call_args_list[0].args[1])
+        self.sender.image.assert_called_once_with("crop-photo")
+        inbound = [r for r in self.interactions.items.values() if r["metaMessageId"] == first["id"]]
+        self.assertEqual(inbound[0]["mediaId"], "crop-photo")
+
+    def test_failure_notice_unknown_delivery_is_not_retried(self):
+        first = self.job(self.message("Why are leaves yellow?"))
+        first["attempts"] = 4
+        self.jobs.upsert_item(first)
+        self.job(self.message("HELP", number=2))
+        self.adviser.side_effect = AdviceUnavailableError("AI unavailable")
+        worker = WhatsAppWorker(self.service)
+        with self.assertLogs("whatsapp_worker", level="ERROR"):
+            worker.tick()
+        self.sender.text.side_effect = [TimeoutError("uncertain send"), "help-reply"]
+        with self.assertLogs("whatsapp_worker", level="ERROR"):
+            worker.tick()
+        worker.tick()
+        self.assertEqual(self.jobs.items[first["id"]]["status"], "delivery_unknown")
+        self.assertEqual(self.jobs.items["inbound-2"]["status"], "sent")
+        self.assertEqual(self.sender.text.call_count, 2)
+
+    def test_expired_photo_is_retained_without_processing_or_sending(self):
+        expired = self.job(self.message(
+            kind="image", image={"id": "old-photo"},
+            timestamp=str(int((utcnow() - timedelta(hours=25)).timestamp())),
+        ))
+        self.job(self.message("HELP", number=2))
+        with self.assertLogs("whatsapp_worker", level="WARNING"):
+            WhatsAppWorker(self.service).tick()
+        job = self.jobs.items[expired["id"]]
+        self.assertEqual(job["status"], "cancelled")
+        self.assertEqual(job["cancelReason"], "reply_window_closed")
+        self.assertEqual(self.jobs.items["inbound-2"]["status"], "sent")
+        self.adviser.assert_not_called()
+        self.sender.image.assert_not_called()
+        self.sender.text.assert_called_once()
+        self.assertTrue(any(r.get("mediaId") == "old-photo" for r in self.interactions.items.values()))
+
+    def test_reply_window_is_rechecked_after_generation(self):
+        first = self.job(self.message("Why are leaves yellow?"))
+        with patch.object(self.service, "conversation", side_effect=[
+            {"windowOpen": True}, {"windowOpen": False},
+        ]), self.assertLogs("whatsapp_worker", level="WARNING"):
+            WhatsAppWorker(self.service).tick()
+        self.adviser.assert_called_once()
+        self.sender.text.assert_not_called()
+        self.assertEqual(self.jobs.items[first["id"]]["cancelReason"], "reply_window_closed")
+
+    def test_failed_onboarding_still_blocks_later_steps(self):
+        first = self.job(self.message("YES"))
+        first["attempts"] = 4
+        self.jobs.upsert_item(first)
+        second = self.job(self.message("Farmer", number=2))
+        with patch.object(self.service, "handle", side_effect=RuntimeError("storage unavailable")):
+            with self.assertLogs("whatsapp_worker", level="ERROR"):
+                WhatsAppWorker(self.service).tick()
+        self.assertEqual(self.jobs.items[first["id"]]["status"], "failed")
+        self.assertNotIn("attempts", self.jobs.items[second["id"]])
+        self.sender.text.assert_not_called()
+
+    def test_media_download_failure_is_classified_as_failed_advice(self):
+        self.sender.image.side_effect = RuntimeError("Meta media unavailable")
+        with self.assertRaises(AdviceUnavailableError):
+            self.service.handle(self.user, self.message(kind="image", image={"id": "crop-photo"}))
+        self.adviser.assert_not_called()
 
     def test_blocked_backlog_does_not_starve_other_farmers(self):
         first = self.job(self.message("Waiting for retry"))

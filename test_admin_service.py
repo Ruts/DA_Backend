@@ -7,7 +7,8 @@ from unittest.mock import Mock, patch
 from fastapi.testclient import TestClient
 
 from admin_service import account_id, check_password, password_hash
-from farmer_service import iso, utcnow
+from farmer_service import AdviceUnavailableError, iso, utcnow
+from google.api_core.exceptions import NotFound
 from test_farmer_service import Container
 from whatsapp_worker import WhatsAppWorker
 
@@ -98,6 +99,19 @@ class AdminTests(unittest.TestCase):
             self.assertEqual(self.login(password=self.changed).status_code, 401)
         self.assertEqual(self.login(password="incorrect").json()["detail"], "Invalid email or password.")
         self.assertEqual(self.login(email="nobody@example.invalid").json()["detail"], "Invalid email or password.")
+
+    def test_ai_provider_failure_and_empty_response_are_explicit(self):
+        for error in (NotFound("model unavailable"), None):
+            with self.subTest(error=type(error).__name__):
+                adviser = Mock()
+                adviser.generate_content.side_effect = error
+                adviser.generate_content.return_value.text = ""
+                with patch.object(self.module.genai, "GenerativeModel", return_value=adviser):
+                    with self.assertRaises(AdviceUnavailableError):
+                        self.module.advise_farmer(
+                            {"language": "en"}, {"id": "farm"}, [], "Inspect this crop.",
+                            (b"synthetic-image", "image/png"),
+                        )
 
     def test_role_boundaries_and_password_change_revokes_old_token(self):
         admin = self.admin()

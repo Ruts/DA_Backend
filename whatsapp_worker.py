@@ -8,7 +8,8 @@ from azure.cosmos.exceptions import CosmosAccessConditionFailedError, CosmosHttp
 from fastapi import HTTPException
 
 from farmer_service import (
-    automation_blocked, automation_paused, automation_revision, iso, next_forecast, utcnow,
+    AdviceUnavailableError, automation_blocked, automation_paused, automation_revision,
+    iso, next_forecast, utcnow,
 )
 from meta_whatsapp import phone_id, required
 
@@ -56,6 +57,13 @@ class WhatsAppWorker:
         )
         job.update(updated)
 
+    def reply_window_open(self, job, user):
+        if self.service.conversation(user or {"phoneNumber": job["owner"]})["windowOpen"]:
+            return True
+        job["cancelReason"] = "reply_window_closed"
+        logger.warning("WhatsApp job %s expired; waiting for a fresh inbound message.", job["id"])
+        return False
+
     def prepare_inbound(self, job):
         service = self.service
         message = job["message"]
@@ -100,6 +108,10 @@ class WhatsAppWorker:
     def deliver(self, job):
         service = self.service
         if job["kind"] == "inbound":
+            service.record_inbound(job["message"])
+            user = service.find_user(job["owner"])
+            if not self.reply_window_open(job, user):
+                return None
             if "reply" not in job:
                 job["reply"] = self.prepare_inbound(job)
                 self.save_job(job)
@@ -108,6 +120,8 @@ class WhatsAppWorker:
                 not job["reply"] or automation_blocked(user, job)
                 or automation_revision(user) != job.get("automationRevision", "")
             ):
+                return None
+            if not self.reply_window_open(job, user):
                 return None
             job["status"] = "sending"
             self.save_job(job)
@@ -193,21 +207,38 @@ class WhatsAppWorker:
             processed += 1
             try:
                 message_id = self.deliver(job)
-            except Exception:
+            except Exception as error:
                 # The worker boundary must preserve failed jobs without logging private payloads.
                 logger.exception("WhatsApp job %s failed", job["id"])
                 job["lastErrorAt"] = iso(utcnow())
+                job["lastErrorType"] = type(error.__cause__ or error).__name__
                 job["status"] = (
                     "delivery_unknown" if job["status"] == "sending"
                     else "failed" if job["attempts"] >= 5 else "pending"
                 )
                 job["availableAt"] = iso(utcnow() + timedelta(minutes=min(30, 2 ** job["attempts"])))
+                if job["status"] == "failed" and isinstance(error, AdviceUnavailableError):
+                    user = self.service.find_user(job["owner"])
+                    job["failureKind"] = "advice"
+                    job["reply"] = (
+                        "Samahani, sijaweza kuchakata swali au picha yako. "
+                        "Tafadhali tuma tena baadaye, au wasiliana na mtaalamu wa kilimo wa eneo lako."
+                        if (user or {}).get("language") == "sw" else
+                        "Sorry, I could not process your question or photo. Please resend it later, "
+                        "or contact your local agronomist."
+                    )
+                    job["status"] = "pending"
+                    job["availableAt"] = iso(utcnow())
                 self.save_job(job)
                 continue
-            job["status"] = "sent" if message_id else "cancelled"
+            job["status"] = (
+                "failed_advice" if job.get("failureKind") == "advice"
+                else "sent" if message_id else "cancelled"
+            )
             job["metaMessageId"] = message_id
             job["completedAt"] = iso(utcnow())
-            job["ttl"] = 8 * 86400
+            if job["status"] != "failed_advice":
+                job["ttl"] = 8 * 86400
             self.save_job(job)
 
 
